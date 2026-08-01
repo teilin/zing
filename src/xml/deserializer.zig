@@ -16,9 +16,9 @@ pub const Deserializer = struct {
     /// Parse a PutBlockList request body.
     /// Returns ordered list of committed block IDs.
     pub fn parsePutBlockList(self: *Deserializer, xml: []const u8) !PutBlockListResult {
-        var committed = std.ArrayList([]const u8).init(self.allocator);
-        var uncommitted = std.ArrayList([]const u8).init(self.allocator);
-        var latest = std.ArrayList([]const u8).init(self.allocator);
+        var committed = std.array_list.AlignedManaged([]const u8, null).init(self.allocator);
+        var uncommitted = std.array_list.AlignedManaged([]const u8, null).init(self.allocator);
+        var latest = std.array_list.AlignedManaged([]const u8, null).init(self.allocator);
 
         var parser = XmlParser.init(xml);
         while (try parser.next()) |event| {
@@ -98,7 +98,7 @@ pub const Deserializer = struct {
     }
 
     fn parseElementText(self: *Deserializer, parser: *XmlParser, end_tag: []const u8) ![]const u8 {
-        var content = std.ArrayList(u8).init(self.allocator);
+        var content = std.array_list.AlignedManaged(u8, null).init(self.allocator);
         while (try parser.next()) |event| {
             switch (event) {
                 .text => |t| try content.appendSlice(t),

@@ -3,31 +3,28 @@ const http = @import("http/server.zig");
 const storage = @import("storage/backend.zig");
 const router_mod = @import("http/router.zig");
 
-pub fn main() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+pub fn main(init: std.process.Init.Minimal) !void {
+    var gpa = std.heap.DebugAllocator(.{}){};
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
     // Parse CLI args
-    const args = try std.process.argsAlloc(allocator);
-    defer std.process.argsFree(allocator, args);
-
     var blob_port: u16 = 10000;
     var workspace_path: []const u8 = "./data";
     var in_memory = false;
 
-    var i: usize = 1;
-    while (i < args.len) : (i += 1) {
-        if (std.mem.eql(u8, args[i], "--blob-port") and i + 1 < args.len) {
-            blob_port = std.fmt.parseInt(u16, args[i + 1], 10) catch {
-                std.log.err("invalid port: {s}", .{args[i + 1]});
+    var args_iter = std.process.Args.Iterator.init(init.args);
+    defer args_iter.deinit();
+    _ = args_iter.skip();
+    while (args_iter.next()) |arg| {
+        if (std.mem.eql(u8, arg, "--blob-port")) {
+            blob_port = std.fmt.parseInt(u16, args_iter.next() orelse return error.InvalidPort, 10) catch {
+                std.log.err("invalid port: {s}", .{arg});
                 return error.InvalidPort;
             };
-            i += 1;
-        } else if (std.mem.eql(u8, args[i], "--workspace") and i + 1 < args.len) {
-            workspace_path = args[i + 1];
-            i += 1;
-        } else if (std.mem.eql(u8, args[i], "--in-memory")) {
+        } else if (std.mem.eql(u8, arg, "--workspace")) {
+            workspace_path = args_iter.next() orelse return error.MissingArg;
+        } else if (std.mem.eql(u8, arg, "--in-memory")) {
             in_memory = true;
         }
     }

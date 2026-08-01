@@ -25,6 +25,7 @@ pub const Router = struct {
         self: *Router,
         method: []const u8,
         path: []const u8,
+        query: []const u8,
         headers: std.StringHashMap([]const u8),
         body: []const u8,
     ) !RouteResult {
@@ -36,33 +37,42 @@ pub const Router = struct {
         const account = segments.next() orelse return self.notFound();
         _ = account;
 
-        const container = segments.next() orelse {
-            // No container — list containers or container-level operations
-            return self.handleAccountLevel(method, path);
+        const container_seg = segments.next() orelse {
+            // No container — account-level operation
+            return self.handleAccountLevel(method, query);
         };
+
+        // Handle empty container (path ends with / after account)
+        if (container_seg.len == 0 or container_seg[0] == '?') {
+            return self.handleAccountLevel(method, if (container_seg.len > 0 and container_seg[0] == '?') blk: {
+                // Query is embedded in path segment, use it
+                break :blk container_seg[1..];
+            } else query);
+        }
+        const container = container_seg;
 
         const blob = segments.rest();
 
         // Container-level operations (no blob path)
         if (blob.len == 0) {
-            return self.handleContainerLevel(method, container, path);
+            return self.handleContainerLevel(method, container, query);
         }
 
         // Blob-level operations
         return self.handleBlobLevel(method, container, blob, body);
     }
 
-    fn handleAccountLevel(self: *Router, method: []const u8, path: []const u8) !RouteResult {
-        const comp = self.getQueryParam(path, "comp");
+    fn handleAccountLevel(self: *Router, method: []const u8, query: []const u8) !RouteResult {
+        const comp = self.getQueryParam(query, "comp");
         if (mem.eql(u8, method, "GET") and mem.eql(u8, comp orelse "", "list")) {
             return self.listContainers();
         }
         return self.notFound();
     }
 
-    fn handleContainerLevel(self: *Router, method: []const u8, container: []const u8, path: []const u8) !RouteResult {
-        const comp = self.getQueryParam(path, "comp");
-        const restype = self.getQueryParam(path, "restype");
+    fn handleContainerLevel(self: *Router, method: []const u8, container: []const u8, query: []const u8) !RouteResult {
+        const comp = self.getQueryParam(query, "comp");
+        const restype = self.getQueryParam(query, "restype");
 
         if (restype == null or !mem.eql(u8, restype.?, "container")) {
             return self.badRequest("missing restype=container");
@@ -78,7 +88,7 @@ pub const Router = struct {
             return self.getContainerProperties(container);
         }
         if (mem.eql(u8, method, "GET") and mem.eql(u8, comp orelse "", "list")) {
-            const prefix = self.getQueryParam(path, "prefix") orelse "";
+            const prefix = self.getQueryParam(query, "prefix") orelse "";
             return self.listBlobs(container, prefix);
         }
         if (mem.eql(u8, method, "HEAD")) {
@@ -112,7 +122,7 @@ pub const Router = struct {
         var ser = xml.Serializer.init(self.allocator);
         defer ser.deinit();
 
-        var container_entries = std.ArrayList(xml.Serializer.ContainerEntry).init(self.allocator);
+        var container_entries = std.array_list.AlignedManaged(xml.Serializer.ContainerEntry, null).init(self.allocator);
         defer container_entries.deinit();
 
         while (iter.next()) |item| {
@@ -147,7 +157,7 @@ pub const Router = struct {
         var ser = xml.Serializer.init(self.allocator);
         defer ser.deinit();
 
-        var blob_entries = std.ArrayList(xml.Serializer.BlobEntry).init(self.allocator);
+        var blob_entries = std.array_list.AlignedManaged(xml.Serializer.BlobEntry, null).init(self.allocator);
         defer blob_entries.deinit();
 
         while (iter.next()) |item| {
@@ -274,10 +284,9 @@ pub const Router = struct {
         return RouteResult{ .status = "500 Internal Server Error", .body = "Internal Server Error", .content_type = "text/plain" };
     }
 
-    fn getQueryParam(self: *Router, path: []const u8, name: []const u8) ?[]const u8 {
+    fn getQueryParam(self: *Router, query: []const u8, name: []const u8) ?[]const u8 {
         _ = self;
-        const qidx = mem.indexOfScalar(u8, path, '?') orelse return null;
-        const query = path[qidx + 1 ..];
+        if (query.len == 0) return null;
         var it = mem.splitScalar(u8, query, '&');
         while (it.next()) |pair| {
             const eq = mem.indexOfScalar(u8, pair, '=') orelse continue;

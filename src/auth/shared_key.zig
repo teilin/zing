@@ -85,7 +85,7 @@ pub const SharedKey = struct {
         path: []const u8,
         query: ?[]const u8,
     ) ![]u8 {
-        var lines = std.ArrayList([]const u8).init(allocator);
+        var lines = std.array_list.AlignedManaged([]const u8, null).init(allocator);
         defer lines.deinit();
 
         // Each field is "field:value" or empty line for missing optional fields
@@ -122,7 +122,7 @@ pub const SharedKey = struct {
     }
 
     fn canonicalizeMsHeaders(allocator: mem.Allocator, headers: *const Headers) ![]u8 {
-        var header_lines = std.ArrayList([]const u8).init(allocator);
+        var header_lines = std.array_list.AlignedManaged([]const u8, null).init(allocator);
         defer header_lines.deinit();
 
         const ms_headers = &[_]?[]const u8{
@@ -162,7 +162,7 @@ pub const SharedKey = struct {
         }
 
         const Param = struct { name: []const u8, value: []const u8 };
-        var sorted = std.ArrayList(Param).init(allocator);
+        var sorted = std.array_list.AlignedManaged(Param, null).init(allocator);
         defer sorted.deinit();
 
         var it = params.iterator();
@@ -176,7 +176,7 @@ pub const SharedKey = struct {
             }
         }.less);
 
-        var result = std.ArrayList(u8).init(allocator);
+        var result = std.array_list.AlignedManaged(u8, null).init(allocator);
         errdefer result.deinit();
 
         for (sorted.items, 0..) |param, i| {

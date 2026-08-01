@@ -1,7 +1,6 @@
 const std = @import("std");
-const posix = std.posix;
+const c = std.c;
 const builtin = @import("builtin");
-const network = std.net;
 const mem = std.mem;
 
 const Request = @import("request.zig").Request;
@@ -9,30 +8,83 @@ const Router = @import("router.zig").Router;
 
 pub const Server = struct {
     allocator: mem.Allocator,
-    sock: posix.socket_t,
+    sock: c.fd_t,
     port: u16,
     router: *anyopaque,
 
+    fn cErr(errno_val: c_int) anyerror {
+        return switch (errno_val) {
+            @as(c_int, 13) => error.AccessDenied,
+            @as(c_int, 98) => error.AddressInUse,
+            @as(c_int, 97) => error.AddressFamilyNotSupported,
+            @as(c_int, 11) => error.WouldBlock,
+            @as(c_int, 114) => error.ConnectionPending,
+            @as(c_int, 9) => error.BadFileDescriptor,
+            @as(c_int, 111) => error.ConnectionRefused,
+            @as(c_int, 104) => error.ConnectionResetByPeer,
+            @as(c_int, 14) => error.BadAddress,
+            @as(c_int, 4) => error.SystemInterrupt,
+            @as(c_int, 22) => error.InvalidArgument,
+            @as(c_int, 5) => error.InputOutput,
+            @as(c_int, 24) => error.ProcessFdQuotaExceeded,
+            @as(c_int, 23) => error.SystemFdQuotaExceeded,
+            @as(c_int, 12) => error.SystemResources,
+            @as(c_int, 28) => error.NoSpaceLeft,
+            @as(c_int, 20) => error.NotDir,
+            @as(c_int, 2) => error.FileNotFound,
+            @as(c_int, 88) => error.NotSocket,
+            @as(c_int, 1) => error.AccessDenied,
+            @as(c_int, 32) => error.BrokenPipe,
+            @as(c_int, 99) => error.AddressNotAvailable,
+            @as(c_int, 95) => error.OperationNotSupported,
+            @as(c_int, 90) => error.MessageTooBig,
+            else => error.Unexpected,
+        };
+    }
+
     pub fn init(allocator: mem.Allocator, port: u16, store: *anyopaque) !*Server {
         const self = try allocator.create(Server);
+
+        const sock = c.socket(c.AF.INET, @as(c_int, 1) | @as(c_int, 0o4000), 0);
+        if (sock == -1) {
+            allocator.destroy(self);
+            return cErr(c._errno().*);
+        }
+        errdefer _ = c.close(sock);
+
+        const optval: c_int = 1;
+        if (c.setsockopt(sock, @as(c_int, 1), @as(c_int, 2), &optval, @sizeOf(c_int)) == -1) {
+            allocator.destroy(self);
+            return cErr(c._errno().*);
+        }
+
+        var addr = std.os.linux.sockaddr.in{
+            .family = c.AF.INET,
+            .port = mem.nativeToBig(u16, port),
+            .addr = mem.nativeToBig(u32, 0x7f000001),
+            .zero = [8]u8{ 0, 0, 0, 0, 0, 0, 0, 0 },
+        };
+        if (c.bind(sock, @as(*const c.sockaddr, @ptrCast(&addr)), @sizeOf(@TypeOf(addr))) == -1) {
+            allocator.destroy(self);
+            return cErr(c._errno().*);
+        }
+
+        if (c.listen(sock, 128) == -1) {
+            allocator.destroy(self);
+            return cErr(c._errno().*);
+        }
+
         self.* = .{
             .allocator = allocator,
-            .sock = try posix.socket(posix.AF.INET, posix.SOCK.STREAM | posix.SOCK.NONBLOCK, 0),
+            .sock = sock,
             .port = port,
             .router = store,
         };
-        errdefer {
-            posix.close(self.sock);
-            allocator.destroy(self);
-        }
-        try posix.setsockopt(self.sock, posix.SOL.SOCKET, posix.SO.REUSEADDR, &mem.toBytes(@as(c_int, 1)));
-        try posix.bind(self.sock, &network.Address.initIp4(.{127, 0, 0, 1}, port).any, @sizeOf(network.Address));
-        try posix.listen(self.sock, 128);
         return self;
     }
 
     pub fn deinit(self: *Server) void {
-        posix.close(self.sock);
+        _ = c.close(self.sock);
         self.allocator.destroy(self);
     }
 
@@ -46,31 +98,35 @@ pub const Server = struct {
 
     // ─── Linux epoll ────────────────────────────────────────────────────────
     fn loopEpoll(self: *Server) !void {
-        const linux = std.os.linux;
-        const epoll_fd = try posix.epoll_create1(0);
-        defer posix.close(epoll_fd);
+        const epoll_fd = c.epoll_create1(0);
+        if (epoll_fd == -1) return cErr(c._errno().*);
+        defer _ = c.close(epoll_fd);
 
-        var ev = mem.zeroes(linux.epoll_event);
-        ev.events = linux.EPOLL.IN | linux.EPOLL.ET;
+        var ev = mem.zeroes(c.epoll_event);
+        ev.events = @as(u32, 0x001) | @as(u32, 0x80000000);
         ev.data.fd = self.sock;
-        _ = linux.epoll_ctl(epoll_fd, linux.EPOLL.CTL_ADD, self.sock, &ev);
+        if (c.epoll_ctl(epoll_fd, @as(u32, 1), self.sock, &ev) == -1) {
+            return cErr(c._errno().*);
+        }
 
-        const events = try self.allocator.alloc(linux.epoll_event, 64);
+        const events = try self.allocator.alloc(c.epoll_event, 64);
         defer self.allocator.free(events);
 
         const buf = try self.allocator.alloc(u8, 65536);
         defer self.allocator.free(buf);
 
         while (true) {
-            const n = linux.epoll_wait(epoll_fd, events.ptr, @intCast(events.len), -1);
-            for (events[0..n]) |e| {
+            const n = c.epoll_wait(epoll_fd, events.ptr, @intCast(events.len), -1);
+            if (n == -1) return cErr(c._errno().*);
+            for (events[0..@intCast(n)]) |e| {
                 if (e.data.fd == self.sock) {
                     while (true) {
-                        const client = posix.accept(self.sock, null, null, posix.SOCK.NONBLOCK) catch break;
-                        var cev = mem.zeroes(linux.epoll_event);
-                        cev.events = linux.EPOLL.IN | linux.EPOLL.ET | linux.EPOLL.OUT;
+                        const client = c.accept4(self.sock, null, null, @as(c_int, 0o4000));
+                        if (client == -1) break;
+                        var cev = mem.zeroes(c.epoll_event);
+                        cev.events = @as(u32, 0x001) | @as(u32, 0x80000000) | @as(u32, 0x004);
                         cev.data.fd = client;
-                        _ = linux.epoll_ctl(epoll_fd, linux.EPOLL.CTL_ADD, client, &cev);
+                        _ = c.epoll_ctl(epoll_fd, @as(u32, 1), client, &cev);
                     }
                 } else {
                     self.handleClient(e.data.fd, buf) catch {};
@@ -82,36 +138,37 @@ pub const Server = struct {
     // ─── macOS kqueue ────────────────────────────────────────────────────────
     fn loopKqueue(self: *Server) !void {
         _ = self;
-        @compileError("kqueue not yet implemented for Zig 0.14");
+        @compileError("kqueue not yet implemented for Zig 0.16");
     }
 
-    fn handleClient(self: *Server, client_fd: posix.socket_t, read_buf: []u8) !void {
-        const n = posix.read(client_fd, read_buf) catch |err| {
-            if (err == error.WouldBlock) return;
-            posix.close(client_fd);
+    fn handleClient(self: *Server, client_fd: c.fd_t, read_buf: []u8) !void {
+        const n = c.read(client_fd, read_buf.ptr, read_buf.len);
+        if (n == -1) {
+            const err = c._errno().*;
+            if (err == @as(c_int, 11) or err == @as(c_int, 11)) return;
+            _ = c.close(client_fd);
             return;
-        };
+        }
         if (n == 0) {
-            posix.close(client_fd);
+            _ = c.close(client_fd);
             return;
         }
 
-        const data = read_buf[0..n];
+        const data = read_buf[0..@intCast(n)];
         var req = Request.parse(self.allocator, data) catch {
             const resp = "HTTP/1.1 400 Bad Request\r\nContent-Length: 11\r\n\r\nBad Request";
-            _ = posix.write(client_fd, resp) catch {};
-            posix.close(client_fd);
+            _ = c.write(client_fd, resp.ptr, resp.len);
+            _ = c.close(client_fd);
             return;
         };
         defer req.deinit();
 
         // Build response via router
-        // For now, just echo back that the server is alive
         const router: *Router = @ptrCast(@alignCast(self.router));
         var body: []const u8 = "ok";
         var status: []const u8 = "200 OK";
         var content_type: []const u8 = "text/plain";
-        if (router.route(req.method, req.path, req.headers, req.body)) |result| {
+        if (router.route(req.method, req.path, req.query, req.headers, req.body)) |result| {
             body = result.body;
             status = result.status;
             content_type = result.content_type;
@@ -124,11 +181,11 @@ pub const Server = struct {
             .{ status, content_type, body.len, if (req.keep_alive) "keep-alive" else "close" },
         );
         defer self.allocator.free(hdr);
-        _ = posix.write(client_fd, hdr) catch {};
-        _ = posix.write(client_fd, body) catch {};
+        _ = c.write(client_fd, hdr.ptr, hdr.len);
+        _ = c.write(client_fd, body.ptr, body.len);
 
         if (!req.keep_alive) {
-            posix.close(client_fd);
+            _ = c.close(client_fd);
         }
     }
 };

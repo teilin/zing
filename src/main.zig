@@ -1,6 +1,7 @@
 const std = @import("std");
 const http = @import("http/server.zig");
 const storage = @import("storage/backend.zig");
+const router_mod = @import("http/router.zig");
 
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
@@ -12,7 +13,7 @@ pub fn main() !void {
     defer std.process.argsFree(allocator, args);
 
     var blob_port: u16 = 10000;
-    var workspace_path = ".";
+    var workspace_path: []const u8 = "./data";
     var in_memory = false;
 
     var i: usize = 1;
@@ -43,8 +44,11 @@ pub fn main() !void {
         try storage.StorageBackend.initFile(allocator, workspace_path);
     defer backend.deinit();
 
+    // Initialize router
+    var router = router_mod.Router.init(allocator, backend);
+
     // Start HTTP server
-    var server = try http.Server.init(allocator, blob_port, &backend);
+    var server = try http.Server.init(allocator, blob_port, &router);
     defer server.deinit();
 
     std.log.info("Zing blob service listening on port {}", .{blob_port});

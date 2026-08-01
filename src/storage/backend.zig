@@ -10,6 +10,7 @@ const testing = std.testing;
 ///   - MemBackend: in-memory storage, lost on shutdown
 
 pub const StorageBackend = struct {
+    ptr: *anyopaque,
     vtable: *const VTable,
 
     pub const VTable = struct {
@@ -115,47 +116,47 @@ pub const StorageBackend = struct {
 
     /// Thin wrapper that delegates to the vtable.
     pub fn put(self: StorageBackend, container: []const u8, blob: []const u8, data: []const u8, content_type: []const u8) !u64 {
-        return self.vtable.put(@ptrCast(@alignStack(self)), container, blob, data, content_type);
+        return self.vtable.put(self.ptr, container, blob, data, content_type);
     }
 
     pub fn get(self: StorageBackend, container: []const u8, blob: []const u8, range_start: ?u64, range_end: ?u64) !GetResult {
-        return self.vtable.get(@ptrCast(@alignStack(self)), container, blob, range_start, range_end);
+        return self.vtable.get(self.ptr, container, blob, range_start, range_end);
     }
 
     pub fn stat(self: StorageBackend, container: []const u8, blob: []const u8) !StatResult {
-        return self.vtable.stat(@ptrCast(@alignStack(self)), container, blob);
+        return self.vtable.stat(self.ptr, container, blob);
     }
 
     pub fn delete(self: StorageBackend, container: []const u8, blob: []const u8) !void {
-        return self.vtable.delete(@ptrCast(@alignStack(self)), container, blob);
+        return self.vtable.delete(self.ptr, container, blob);
     }
 
     pub fn listContainers(self: StorageBackend) !ContainerIterator {
-        return self.vtable.listContainers(@ptrCast(@alignStack(self)));
+        return self.vtable.listContainers(self.ptr);
     }
 
     pub fn listBlobs(self: StorageBackend, container: []const u8, prefix: []const u8) !BlobIterator {
-        return self.vtable.listBlobs(@ptrCast(@alignStack(self)), container, prefix);
+        return self.vtable.listBlobs(self.ptr, container, prefix);
     }
 
     pub fn createContainer(self: StorageBackend, container: []const u8) !void {
-        return self.vtable.createContainer(@ptrCast(@alignStack(self)), container);
+        return self.vtable.createContainer(self.ptr, container);
     }
 
     pub fn deleteContainer(self: StorageBackend, container: []const u8) !void {
-        return self.vtable.deleteContainer(@ptrCast(@alignStack(self)), container);
+        return self.vtable.deleteContainer(self.ptr, container);
     }
 
     pub fn containerExists(self: StorageBackend, container: []const u8) !bool {
-        return self.vtable.containerExists(@ptrCast(@alignStack(self)), container);
+        return self.vtable.containerExists(self.ptr, container);
     }
 
     pub fn containerProperties(self: StorageBackend, container: []const u8) !ContainerProperties {
-        return self.vtable.containerProperties(@ptrCast(@alignStack(self)), container);
+        return self.vtable.containerProperties(self.ptr, container);
     }
 
     pub fn close(self: StorageBackend) void {
-        return self.vtable.close(@ptrCast(@alignStack(self)));
+        return self.vtable.close(self.ptr);
     }
 
     /// Factory: create a file-backed storage engine.
@@ -203,8 +204,10 @@ pub const FileBackend = struct {
     }
 
     pub fn create(allocator: mem.Allocator, workspace: []const u8) !StorageBackend {
-        const backend = try init(allocator, workspace);
+        const backend = try allocator.create(FileBackend);
+        backend.* = try init(allocator, workspace);
         return StorageBackend{
+            .ptr = @ptrCast(backend),
             .vtable = &.{
                 .put = put,
                 .get = get,
@@ -239,7 +242,7 @@ pub const FileBackend = struct {
         defer self.allocator.free(container_dir);
         try fs.cwd().makePath(container_dir);
 
-        try fs.cwd().writeFile(.{ .path = full_path, .data = data });
+        try fs.cwd().writeFile(.{ .sub_path = full_path, .data = data });
 
         // Update extent store if entry exists (overwrite)
         const key = try std.fmt.allocPrint(self.allocator, "{s}/{s}", .{ container, blob });
@@ -271,8 +274,8 @@ pub const FileBackend = struct {
         };
         defer file.close();
 
-        const stat = try file.stat();
-        const content_length = stat.size;
+        const stat_info = try file.stat();
+        const content_length = stat_info.size;
 
         const start = range_start orelse 0;
         const end = range_end orelse content_length;
@@ -283,7 +286,7 @@ pub const FileBackend = struct {
                 .content_type = "",
                 .content_length = 0,
                 .etag = "",
-                .last_modified = @intCast(stat.mtime),
+                .last_modified = @intCast(stat_info.mtime),
             };
         }
 
@@ -292,19 +295,19 @@ pub const FileBackend = struct {
         const read_len = clamped_end - start;
 
         const buf = try self.allocator.alloc(u8, read_len);
-        const bytes_read = try file.readAll(buf);
+        _ = try file.readAll(buf);
 
         const key = try std.fmt.allocPrint(self.allocator, "{s}/{s}", .{ container, blob });
         defer self.allocator.free(key);
 
-        const content_type = self.extent_store.get(key).map(.content_type);
+        const content_type = if (self.extent_store.get(key)) |entry| entry.content_type else "";
 
         return StorageBackend.GetResult{
             .data = buf,
             .content_type = content_type,
             .content_length = content_length,
             .etag = try self.etagForPath(full_path),
-            .last_modified = @intCast(stat.mtime),
+            .last_modified = @intCast(stat_info.mtime),
         };
     }
 
@@ -316,23 +319,22 @@ pub const FileBackend = struct {
         const file = fs.cwd().openFile(full_path, .{}) catch return error.BlobNotFound;
         defer file.close();
 
-        const stat_info = try file.stat();
+        const file_stat = try file.stat();
 
         const key = try std.fmt.allocPrint(self.allocator, "{s}/{s}", .{ container, blob });
         defer self.allocator.free(key);
 
         const extent = self.extent_store.get(key);
-        const content_type = extent.map(.content_type) orelse "";
+        const content_type = if (extent) |e| e.content_type else "";
 
-        var metadata = std.StringHashMap([]const u8).init(self.allocator);
-        _ = metadata; // TODO: load from sidecar file
+        const metadata = std.StringHashMap([]const u8).init(self.allocator);
 
         return StorageBackend.StatResult{
             .content_type = content_type,
-            .content_length = stat_info.size,
+            .content_length = file_stat.size,
             .etag = try self.etagForPath(full_path),
-            .last_modified = @intCast(stat_info.mtime),
-            .creation_time = @intCast(stat_info.ctime),
+            .last_modified = @intCast(file_stat.mtime),
+            .creation_time = @intCast(file_stat.ctime),
             .metadata = metadata,
         };
     }
@@ -354,7 +356,7 @@ pub const FileBackend = struct {
     fn listContainers(ctx: *anyopaque) !StorageBackend.ContainerIterator {
         const self: *FileBackend = @ptrCast(@alignCast(ctx));
 
-        var dir = fs.cwd().openIterableDir(self.workspace, .{}) catch return StorageBackend.ContainerIterator{
+        var dir = fs.cwd().openDir(self.workspace, .{ .iterate = true }) catch return StorageBackend.ContainerIterator{
             .items = &[_]StorageBackend.ContainerItem{},
             .index = 0,
         };
@@ -363,15 +365,15 @@ pub const FileBackend = struct {
         var items = std.ArrayList(StorageBackend.ContainerItem).init(self.allocator);
         defer items.deinit();
 
-        var it = dir.iterator();
+        var it = dir.iterate();
         while (try it.next()) |entry| {
             if (entry.kind != .directory) continue;
             if (mem.eql(u8, entry.name, "$EXTENTS")) continue; // internal marker
 
-            const stat = try dir.dir.stat(entry.name);
+            const dir_stat = try dir.statFile(entry.name);
             try items.append(.{
                 .name = try self.allocator.dupe(u8, entry.name),
-                .last_modified = @intCast(stat.mtime),
+                .last_modified = @intCast(dir_stat.mtime),
                 .etag = try self.etagForPath(entry.name),
                 .lease_status = "unlocked",
                 .lease_state = "available",
@@ -390,7 +392,7 @@ pub const FileBackend = struct {
         const container_dir = try std.fmt.allocPrint(self.allocator, "{s}/{s}", .{ self.workspace, container });
         defer self.allocator.free(container_dir);
 
-        var dir = fs.cwd().openIterableDir(container_dir, .{}) catch return StorageBackend.BlobIterator{
+        var dir = fs.cwd().openDir(container_dir, .{ .iterate = true }) catch return StorageBackend.BlobIterator{
             .items = &[_]StorageBackend.BlobItem{},
             .index = 0,
         };
@@ -399,22 +401,22 @@ pub const FileBackend = struct {
         var items = std.ArrayList(StorageBackend.BlobItem).init(self.allocator);
         defer items.deinit();
 
-        var it = dir.iterator();
+        var it = dir.iterate();
         while (try it.next()) |entry| {
             if (entry.kind != .file) continue;
             if (prefix.len > 0 and !mem.startsWith(u8, entry.name, prefix)) continue;
 
-            const stat = try dir.dir.stat(entry.name);
+            const blob_stat = try dir.statFile(entry.name);
             const key = try std.fmt.allocPrint(self.allocator, "{s}/{s}", .{ container, entry.name });
             const extent = self.extent_store.get(key);
             self.allocator.free(key);
 
             try items.append(.{
                 .name = try self.allocator.dupe(u8, entry.name),
-                .content_length = @intCast(stat.size),
-                .content_type = extent.map(.content_type) orelse "",
+                .content_length = @intCast(blob_stat.size),
+                .content_type = if (extent) |e| e.content_type else "",
                 .etag = try self.allocator.dupe(u8, ""),
-                .last_modified = @intCast(stat.mtime),
+                .last_modified = @intCast(blob_stat.mtime),
                 .is_committed = true,
                 .metadata = std.StringHashMap([]const u8).init(self.allocator),
             });
@@ -452,7 +454,7 @@ pub const FileBackend = struct {
         const container_dir = try std.fmt.allocPrint(self.allocator, "{s}/{s}", .{ self.workspace, container });
         defer self.allocator.free(container_dir);
 
-        var dir = fs.cwd().openIterableDir(container_dir, .{}) catch return false;
+        var dir = fs.cwd().openDir(container_dir, .{ .iterate = true }) catch return false;
         dir.close();
         return true;
     }
@@ -462,8 +464,8 @@ pub const FileBackend = struct {
         const container_dir = try std.fmt.allocPrint(self.allocator, "{s}/{s}", .{ self.workspace, container });
         defer self.allocator.free(container_dir);
 
-        const stat = try fs.cwd().stat(container_dir);
-        _ = stat;
+        const dir_stat = try fs.cwd().statFile(container_dir);
+        _ = dir_stat;
 
         return StorageBackend.ContainerProperties{
             .last_modified = 0,
@@ -480,13 +482,14 @@ pub const FileBackend = struct {
             self.allocator.free(entry.value_ptr.data);
         }
         self.extent_store.deinit();
+        self.allocator.destroy(self);
     }
 
     fn etagForPath(self: *FileBackend, path: []const u8) ![]u8 {
         const file = fs.cwd().openFile(path, .{}) catch return "";
         defer file.close();
-        const stat = try file.stat();
-        return std.fmt.allocPrint(self.allocator, "\"{d}\"", .{@as(f64, @floatFromInt(stat.mtime_nano))});
+        const file_stat = try file.stat();
+        return std.fmt.allocPrint(self.allocator, "\"{d}\"", .{file_stat.mtime});
     }
 };
 
@@ -596,7 +599,7 @@ pub const ExtentStore = struct {
     }
 
     /// Stage a block for a blob. Returns the block's size.
-    pub fn stageBlock(self: *ExtentStore, container: []const u8, blob: []const u8, block_id: []const u8, data: []const u8, content_type: []const u8) !u64 {
+    pub fn stageBlock(self: *ExtentStore, container: []const u8, blob: []const u8, block_id: []const u8, data: []const u8, _: []const u8) !u64 {
         const key = try std.fmt.allocPrint(self.allocator, "{s}/{s}", .{ container, blob });
         defer self.allocator.free(key);
 
@@ -615,7 +618,7 @@ pub const ExtentStore = struct {
     }
 
     /// Commit all pending blocks for a blob into a single extent, returns ordered block IDs committed.
-    pub fn commitBlocks(self: *ExtentStore, container: []const u8, blob: []const u8, block_list: []const []const u8, content_type: []const u8) ![]u8 {
+    pub fn commitBlocks(self: *ExtentStore, container: []const u8, blob: []const u8, block_list: []const []const u8, _: []const u8) ![]u8 {
         const key = try std.fmt.allocPrint(self.allocator, "{s}/{s}", .{ container, blob });
         defer self.allocator.free(key);
 

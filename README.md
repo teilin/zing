@@ -16,13 +16,10 @@ Azurite is built on Node.js/TypeScript — which means GC pauses, event-loop bot
 
 | Service | Port | Status |
 |---------|------|--------|
-| Blob Storage | 10000 | ✅ **Blob CRUD** — PUT, GET, HEAD, DELETE |
-| Container management | 10000 | ✅ **Container CRUD** — Create, List, Delete |
-| Block blob assembly | 10000 | ✅ **PUT BLOCK / PUT BLOCK LIST / GET BLOCK LIST** |
-| Append Blobs | 10000 | ✅ **APPEND BLOCK** — `?comp=appendblock` |
-| Page Blobs | 10000 | ✅ **PUT PAGE / GET PAGE RANGES** — `?comp=page&offset=N`, `?comp=pagelist` |
-| Queue Storage | 10001 | ✅ **Create/list/delete queues, put/get/peek/clear messages** |
-| Table Storage | 10002 | 🚧 Planned |
+| Blob Storage | 10000 | ✅ **Full blob service** — CRUD, block/append/page blobs, copy, leases, snapshots, ACLs |
+| Queue Storage | 10001 | ✅ **Full queue service** — create/list/delete queues, put/get/peek/clear/update/delete messages |
+| Table Storage | 10002 | ✅ **Full table service** — create/list/delete tables, entity CRUD via JSON REST API |
+| All 3 services run simultaneously from a single `zing` binary | | |
 
 ## Quick Start
 
@@ -36,7 +33,7 @@ git clone https://github.com/teilin/zing.git
 cd zing
 zig build
 
-# Run with defaults (blob port 10000, queue port 10001, workspace ./data)
+# Run with defaults (blob 10000, queue 10001, table 10002, workspace ./data)
 ./zig-out/bin/zing
 
 # Custom configuration
@@ -93,6 +90,35 @@ curl -X PUT -d "$(python3 -c 'print("A" * 512)' 2>/dev/null || printf 'A%.0s' {1
 curl "http://127.0.0.1:10000/devstoreaccount1/mycontainer/page.txt?comp=pagelist"
 
 # Blob Authenticated request (SharedKey)
+# Blob Copy (from source to destination)
+curl -X PUT -d "Original" "http://127.0.0.1:10000/devstoreaccount1/srccont/source.txt"
+curl -X PUT "http://127.0.0.1:10000/devstoreaccount1/dstcont/dest.txt" \
+  -H "x-ms-copy-source: /devstoreaccount1/srccont/source.txt"
+
+# Blob Snapshot
+curl -X PUT -d "Data" "http://127.0.0.1:10000/devstoreaccount1/mycont/snap.txt?comp=snapshot"
+
+# Blob Leases
+curl -X PUT "http://127.0.0.1:10000/devstoreaccount1/mycont/lease.txt?comp=lease" \
+  -H "x-ms-lease-action: acquire" -H "x-ms-lease-duration: 30"
+curl -X PUT "http://127.0.0.1:10000/devstoreaccount1/mycont/lease.txt?comp=lease" \
+  -H "x-ms-lease-action: renew" -H "x-ms-lease-id: {lease-id}"
+curl -X PUT "http://127.0.0.1:10000/devstoreaccount1/mycont/lease.txt?comp=lease" \
+  -H "x-ms-lease-action: release" -H "x-ms-lease-id: {lease-id}"
+
+# OAuth (Bearer token)
+curl -X PUT -d "Data" "http://127.0.0.1:10000/devstoreaccount1/mycont/oauth.txt" \
+  -H "Authorization: Bearer eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9..."
+
+# RA-GRS secondary (read-only)
+curl "http://127.0.0.1:10000/devstoreaccount1-secondary/mycont/blob.txt"
+curl -X PUT -d "write" "http://127.0.0.1:10000/devstoreaccount1-secondary/cont/blob.txt" \
+  -w "%{http_code}"  # → 409 Conflict
+
+# Container ACLs
+curl -X PUT "http://127.0.0.1:10000/devstoreaccount1/mycont?restype=container&comp=acl" \
+  -d '<?xml version="1.0"?><SignedIdentifiers></SignedIdentifiers>'
+curl "http://127.0.0.1:10000/devstoreaccount1/mycont?restype=container&comp=acl"
 
 # Queue: Create a queue
 curl -X PUT "http://127.0.0.1:10001/devstoreaccount1/myqueue"
@@ -111,6 +137,30 @@ curl "http://127.0.0.1:10001/devstoreaccount1/myqueue/messages?peekonly=true"
 
 # Queue: Clear messages
 curl -X DELETE "http://127.0.0.1:10001/devstoreaccount1/myqueue/messages"
+
+# Table: Create table
+curl -X PUT "http://127.0.0.1:10002/devstoreaccount1/mytable"
+
+# Table: List tables
+curl "http://127.0.0.1:10002/devstoreaccount1/"
+
+# Table: Insert entity
+curl -X POST "http://127.0.0.1:10002/devstoreaccount1/mytable" \
+  -H "Content-Type: application/json" \
+  -d '{"PartitionKey":"pk1","RowKey":"rk1","Name":"Test"}'
+
+# Table: Get entity
+curl "http://127.0.0.1:10002/devstoreaccount1/mytable(PartitionKey='pk1',RowKey='rk1')"
+
+# Table: Update entity
+curl -X PUT "http://127.0.0.1:10002/devstoreaccount1/mytable(PartitionKey='pk1',RowKey='rk1')" \
+  -d '{"Name":"Updated"}'
+
+# Table: Delete entity
+curl -X DELETE "http://127.0.0.1:10002/devstoreaccount1/mytable(PartitionKey='pk1',RowKey='rk1')"
+
+# Table: Delete table
+curl -X DELETE "http://127.0.0.1:10002/devstoreaccount1/mytable"
 ```
 
 ## Default Dev Credentials
@@ -139,6 +189,14 @@ Zing implements the Azure Storage REST API.
 - `PUT /{container}/{blob}?comp=appendblock` — Append to an append blob (✅ 201 Created)
 - `PUT /{container}/{blob}?comp=page&offset={offset}` — Write a 512-byte page (✅ 201 Created)
 - `GET /{container}/{blob}?comp=pagelist` — List page ranges (✅ 200 + XML)
+- `PUT /{container}/{blob}?comp=snapshot` — Create a blob snapshot (✅ 201 Created)
+- `GET /{container}/{blob}?snapshot={id}` — Read blob snapshot (✅ 200)
+- `DELETE /{container}/{blob}?snapshot={id}` — Delete blob snapshot (✅ 202)
+- `PUT /{container}/{blob}` with `x-ms-copy-source` — Copy blob (✅ 202 Accepted)
+- `PUT /{container}/{blob}?comp=lease` — Lease operations (✅ acquire/renew/change/release/break)
+- `PUT /{container}?restype=container&comp=acl` — Set container ACL (✅ 200)
+- `GET /{container}?restype=container&comp=acl` — Get container ACL (✅ 200 + XML)
+- `GET /{account}-secondary/...` — RA-GRS secondary reads (✅ GET/HEAD allowed, writes rejected 409)
 
 ### Queue Service — Verified Working
 
@@ -152,21 +210,33 @@ Zing implements the Azure Storage REST API.
 - `PUT /{queue}/messages/{id}?popreceipt={receipt}&visibilitytimeout=X` — Update message (✅ 204 No Content)
 - `DELETE /{queue}/messages` — Clear all messages (✅ 204 No Content)
 
+### Table Service — Verified Working
+
+- `PUT /{table}` — Create table (✅ 201 Created)
+- `GET /` — List tables (✅ 200 + JSON)
+- `DELETE /{table}` — Delete table (✅ 204 No Content)
+- `POST /{table}` — Insert entity (✅ 201 + JSON)
+- `GET /{table}` — Query entities (✅ 200 + JSON)
+- `GET /{table}(PartitionKey='{pk}',RowKey='{rk}')` — Get entity (✅ 200 + JSON)
+- `PUT /{table}(PartitionKey='{pk}',RowKey='{rk}')` — Update/replace entity (✅ 204)
+- `PATCH /{table}(PartitionKey='{pk}',RowKey='{rk}')` — Merge entity (✅ 204)
+- `DELETE /{table}(PartitionKey='{pk}',RowKey='{rk}')` — Delete entity (✅ 204)
+
 ### Authentication — Implemented
 
 - `SAS` (Shared Access Signature) — ✅ Service SAS token parsing + HMAC-SHA256 validation + permission checking
-- `SharedKey` — ✅ Core HMAC-SHA256 validator implemented; router wiring in progress
+- `SharedKey` — ✅ HMAC-SHA256 signature validation
+- `OAuth` (Bearer token) — ✅ Bearer token validation (dev mode accepts any well-formed token)
 - No-auth requests pass through (dev mode)
+
+### RA-GRS
+
+- `{account}-secondary` endpoint — ✅ Read-only secondary endpoint (GET/HEAD only; writes rejected with 409)
 
 ### Planned
 
-- Blob Leases
-- Container ACLs and permissions
-- Blob Snapshots / Versions
-- Copy Blob (async copy)
-- OAuth token validation
-- Table Service (port 10002)
-- RA-GRS secondary
+- OAuth token validation (JWT format validation)
+- RA-GRS secondary (async replication)
 
 ## Architecture
 
@@ -174,15 +244,17 @@ Zing implements the Azure Storage REST API.
 zing/
 ├── build.zig                    # Zig build manifest
 ├── src/
-│   ├── main.zig                 # Entry point, CLI args, dual-server startup
+│   ├── main.zig                 # Entry point, CLI args, triple-server startup (blob + queue + table)
 │   ├── http/
 │   │   ├── server.zig          # epoll HTTP server (Linux) / kqueue (macOS, stub)
-│   │   ├── router.zig          # Blob path → handler dispatch + SAS/SharedKey auth
+│   │   ├── router.zig          # Blob path → handler dispatch + SAS/SharedKey/OAuth + RA-GRS
 │   │   ├── request.zig          # HTTP request parsing
-│   │   └── response.zig         # (future)
 │   ├── queue/
 │   │   ├── queue.zig            # In-memory QueueStore with visibility timeouts/pop receipts
 │   │   └── handlers.zig         # Queue REST API router
+│   ├── table/
+│   │   ├── table.zig            # In-memory TableStore with tables and entities
+│   │   └── handlers.zig         # Table REST API router (JSON)
 │   ├── auth/
 │   │   ├── shared_key.zig       # SharedKey HMAC-SHA256 validation
 │   │   └── sas.zig              # Service SAS token validation
@@ -191,10 +263,6 @@ zing/
 │   ├── xml/
 │   │   ├── serializer.zig       # XML response generation
 │   │   └── deserializer.zig     # XML request parsing
-│   └── util/
-│       ├── allocator.zig        # (future arena allocator)
-│       ├── crc64.zig            # (future SIMD CRC64-NG)
-│       └── hex.zig              # (future hex encoding)
 └── docs/
     ├── prompt.md                # Original project generation prompt
     └── memory-wiki.md           # Development diary
@@ -209,7 +277,15 @@ zing/
 
 ```bash
 zig build
-./zig-out/bin/zing --blob-port 10000 --queue-port 10001
+
+# Run all three services (blob 10000, queue 10001, table 10002)
+./zig-out/bin/zing
+
+# Custom workspace
+./zig-out/bin/zing --blob-port 10000 --queue-port 10001 --workspace /tmp/zing-data
+
+# In-memory mode (no disk I/O, data lost on shutdown)
+./zig-out/bin/zing --in-memory
 ```
 
 ## Performance vs Azurite

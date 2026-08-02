@@ -303,7 +303,7 @@ fn deleteTree(allocator: mem.Allocator, path: []const u8) !void {
     const dir_fd: i32 = @intCast(dir_fd_rc);
     defer _ = linux.close(dir_fd);
 
-    var buf: [4096]u8 = undefined;
+    var buf: [4096]u8 align(@alignOf(linux.dirent64)) = undefined;
     while (true) {
         const n = linux.getdents64(dir_fd, &buf, buf.len);
         const n_err = syscallErrno(n);
@@ -563,7 +563,7 @@ pub const FileBackend = struct {
         var items = std.array_list.Managed(StorageBackend.ContainerItem).init(self.allocator);
         defer items.deinit();
 
-        var buf: [4096]u8 = undefined;
+        var buf: [4096]u8 align(@alignOf(linux.dirent64)) = undefined;
         while (true) {
             const n = linux.getdents64(dir_fd, &buf, buf.len);
             const n_err = syscallErrno(n);
@@ -628,7 +628,7 @@ pub const FileBackend = struct {
         var items = std.array_list.Managed(StorageBackend.BlobItem).init(self.allocator);
         defer items.deinit();
 
-        var buf: [4096]u8 = undefined;
+        var buf: [4096]u8 align(@alignOf(linux.dirent64)) = undefined;
         while (true) {
             const n = linux.getdents64(dir_fd, &buf, buf.len);
             const n_err = syscallErrno(n);

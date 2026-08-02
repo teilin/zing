@@ -17,7 +17,7 @@ Azurite is built on Node.js/TypeScript — which means GC pauses, event-loop bot
 | Service | Port | Status |
 |---------|------|--------|
 | Blob Storage | 10000 | ✅ **Blob CRUD** — PUT, GET, HEAD, DELETE |
-| Container management | 10000 | ⚠️ Create, List, Delete (routing fix in progress) |
+| Container management | 10000 | ✅ **Container CRUD** — Create, List, Delete |
 | Queue Storage | 10001 | 🚧 Planned |
 | Table Storage | 10002 | 🚧 Planned |
 
@@ -78,16 +78,16 @@ curl "http://127.0.0.1:10000/devstoreaccount1/mycontainer?restype=container&comp
 
 Zing implements the Azure Storage REST API.
 
-### Blob Service — Verified Working
+### Blob & Container Service — Verified Working
 
+- `PUT /{container}?restype=container` — Create container (✅ 201 Created)
+- `GET /?comp=list` — List containers (✅ 200 + XML)
+- `GET /{container}?restype=container&comp=list` — List blobs (✅ 200 + XML)
+- `DELETE /{container}?restype=container` — Delete container (✅ 202 Accepted)
 - `PUT /{container}/{blob}` — Create/replace block blob (✅ 201 Created)
 - `GET /{container}/{blob}` — Read blob (✅ 200 + content)
 - `HEAD /{container}/{blob}` — Blob metadata and properties (✅ 200)
 - `DELETE /{container}/{blob}` — Delete blob (✅ 202 Accepted)
-
-### Container Operations — Known Issue
-
-- Container create/list/delete operations require a routing fix for query string parsing (`?restype=container`)
 
 ### Planned
 

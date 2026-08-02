@@ -61,7 +61,12 @@ pub const Router = struct {
         var segments = mem.splitScalar(u8, path, '/');
         _ = segments.next(); // skip leading empty
         const account = segments.next() orelse return self.notFound();
-        _ = account;
+        const is_secondary = mem.endsWith(u8, account, "-secondary");
+
+        // RA-GRS: reject writes on secondary endpoint
+        if (is_secondary and !mem.eql(u8, method, "GET") and !mem.eql(u8, method, "HEAD")) {
+            return self.readOnlyGeo();
+        }
 
         const container_seg = segments.next() orelse {
             // No container — account-level operation
@@ -558,9 +563,19 @@ pub const Router = struct {
         };
     }
 
-    // ── Helpers ──────────────────────────────────────────────────────────────────
+    // ── Auth / Helpers ──────────────────────────────────────────────────────────────────
 
-    /// Authenticate the request via SAS token or SharedKey header.
+    /// Reject write requests to the RA-GRS secondary endpoint.
+    fn readOnlyGeo(self: *Router) RouteResult {
+        _ = self;
+        return RouteResult{
+            .status = "409 Conflict",
+            .body = "{\"error\":\"The secondary read-only endpoint does not support write operations.\"}",
+            .content_type = "application/json",
+        };
+    }
+
+    /// Authenticate the request via SAS token, SharedKey header, or Bearer token.
     /// Returns error.AuthenticationFailed if both methods fail.
     pub fn authenticate(
         self: *Router,
@@ -579,11 +594,17 @@ pub const Router = struct {
             return;
         }
 
-        // Check for SharedKey Authorization header
+        // Check for OAuth Bearer token before SharedKey (both use authorization header)
         const auth_header = headers.get("authorization");
         if (auth_header) |auth| {
-            // Build SharedKey Headers from request headers
-            var sk_headers = shared_key.Headers.init(self.allocator);
+            if (mem.startsWith(u8, auth, "Bearer ")) {
+                // For the emulator, accept any well-formed Bearer token.
+                const token = auth["Bearer ".len..];
+                if (token.len == 0) return error.AuthenticationFailed;
+                return;
+            } else if (mem.startsWith(u8, auth, "SharedKey ")) {
+                // SharedKey Authorization header
+                var sk_headers = shared_key.Headers.init(self.allocator);
             defer sk_headers.deinit();
 
             sk_headers.authorization = auth;
@@ -619,6 +640,9 @@ pub const Router = struct {
             );
             return;
         }
+        }
+
+        // No auth required in dev mode
     }
 
     /// Strip SAS-related query parameters from a query string.

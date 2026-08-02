@@ -39,8 +39,11 @@ pub const Router = struct {
         // Authenticate request (SAS or SharedKey)
         try self.authenticate(method, path, query, headers);
 
-        // Strip SAS query params from the query string before routing
-        const clean_query = query;
+        // Strip SAS query params from the query string before routing.
+        // SAS params (sig, se, sv, sp, sr, si, sip, spr) don't overlap with
+        // routing params (comp, restype, blockid, popreceipt) so we can
+        // safely pass the raw query through without stripping.
+        const clean_query = try self.stripSasParams(query);
         // Parse path: /account/container/blob
         var segments = mem.splitScalar(u8, path, '/');
         _ = segments.next(); // skip leading empty
@@ -358,24 +361,19 @@ pub const Router = struct {
     }
 
     /// Strip SAS-related query parameters from a query string.
+    /// Returns a newly allocated owned slice — caller must free.
     fn stripSasParams(self: *Router, query: []const u8) ![]const u8 {
-        if (query.len == 0) return "";
+        if (query.len == 0) return &[_]u8{};
 
-        var result = std.array_list.Managed(u8).init(self.allocator);
-        defer result.deinit();
-
+        // First pass: count non-SAS params
+        var count: usize = 0;
         var it = mem.splitScalar(u8, query, '&');
-        var first = true;
         while (it.next()) |pair| {
             const eq = mem.indexOfScalar(u8, pair, '=') orelse {
-                // No equals sign, keep as-is
-                if (!first) try result.append('&');
-                try result.appendSlice(pair);
-                if (first) first = false;
+                count += 1;
                 continue;
             };
             const key = pair[0..eq];
-            // Skip SAS params
             if (mem.eql(u8, key, "sig") or
                 mem.eql(u8, key, "se") or
                 mem.eql(u8, key, "sv") or
@@ -390,13 +388,54 @@ pub const Router = struct {
                 mem.eql(u8, key, "rsce") or
                 mem.eql(u8, key, "rscl") or
                 mem.eql(u8, key, "rsct"))
+            {
                 continue;
-            if (!first) try result.append('&');
-            try result.appendSlice(pair);
-            if (first) first = false;
+            }
+            count += 1;
         }
 
-        return try result.toOwnedSlice();
+        // If all params are SAS, return empty
+        if (count == 0) return &[_]u8{};
+
+        // Second pass: build the result
+        var result = try self.allocator.alloc(u8, query.len);
+        var pos: usize = 0;
+        var first = true;
+        it = mem.splitScalar(u8, query, '&');
+        while (it.next()) |pair| {
+            const eq = mem.indexOfScalar(u8, pair, '=');
+            if (eq == null) {
+                if (!first) { result[pos] = '&'; pos += 1; }
+                @memcpy(result[pos..][0..pair.len], pair);
+                pos += pair.len;
+                first = false;
+                continue;
+            }
+            const key = pair[0..eq.?];
+            if (mem.eql(u8, key, "sig") or
+                mem.eql(u8, key, "se") or
+                mem.eql(u8, key, "sv") or
+                mem.eql(u8, key, "sr") or
+                mem.eql(u8, key, "sp") or
+                mem.eql(u8, key, "st") or
+                mem.eql(u8, key, "sip") or
+                mem.eql(u8, key, "spr") or
+                mem.eql(u8, key, "si") or
+                mem.eql(u8, key, "rscc") or
+                mem.eql(u8, key, "rscd") or
+                mem.eql(u8, key, "rsce") or
+                mem.eql(u8, key, "rscl") or
+                mem.eql(u8, key, "rsct"))
+            {
+                continue;
+            }
+            if (!first) { result[pos] = '&'; pos += 1; }
+            @memcpy(result[pos..][0..pair.len], pair);
+            pos += pair.len;
+            first = false;
+        }
+
+        return result[0..pos];
     }
 
     fn notFound(self: *Router) !RouteResult {

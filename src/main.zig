@@ -26,9 +26,10 @@ fn queueRouteFn(ctx: *anyopaque, method: []const u8, path: []const u8, query: []
 }
 
 pub fn main(init: std.process.Init.Minimal) !void {
-    var gpa = std.heap.DebugAllocator(.{}){};
-    defer _ = gpa.deinit();
-    const allocator = gpa.allocator();
+    const blob_allocator = std.heap.page_allocator;
+    const q_allocator = std.heap.page_allocator;
+
+    // Main allocator only for startup/shared data
 
     // Parse CLI args
     var blob_port: u16 = 10000;
@@ -63,28 +64,28 @@ pub fn main(init: std.process.Init.Minimal) !void {
     std.log.info("  workspace:   {s}", .{workspace_path});
     std.log.info("  in-memory:   {}", .{in_memory});
 
-    // Initialize storage backend for blobs
+    // Initialize storage backend for blobs (uses blob_allocator)
     var blob_backend = if (in_memory)
-        try storage.StorageBackend.initInMemory(allocator)
+        try storage.StorageBackend.initInMemory(blob_allocator)
     else
-        try storage.StorageBackend.initFile(allocator, workspace_path);
+        try storage.StorageBackend.initFile(blob_allocator, workspace_path);
     defer blob_backend.deinit();
 
-    // Initialize queue store
-    var queue_store = queue.QueueStore.init(allocator);
+    // Initialize queue store with its own allocator
+    var queue_store = queue.QueueStore.init(q_allocator);
     defer queue_store.deinit();
 
     // Initialize routers
-    var blob_router = router_mod.Router.init(allocator, blob_backend);
-    var q_router = queue_handler.QueueRouter.init(allocator, &queue_store);
+    var blob_router = router_mod.Router.init(blob_allocator, blob_backend);
+    var q_router = queue_handler.QueueRouter.init(q_allocator, &queue_store);
 
-    // Start blob server (main thread)
-    var blob_server = try http.Server.init(allocator, blob_port, &blob_router, blobRouteFn);
+    // Start blob server (background thread)
+    var blob_server = try http.Server.init(blob_allocator, blob_port, &blob_router, blobRouteFn);
     defer blob_server.deinit();
     std.log.info("Zing blob service listening on port {}", .{blob_port});
 
     // Start queue server (background thread)
-    var q_server = try http.Server.init(allocator, queue_port, &q_router, queueRouteFn);
+    var q_server = try http.Server.init(q_allocator, queue_port, &q_router, queueRouteFn);
     defer q_server.deinit();
     std.log.info("Zing queue service listening on port {}", .{queue_port});
 

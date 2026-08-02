@@ -447,10 +447,12 @@ pub const FileBackend = struct {
         const key = try std.fmt.allocPrint(self.allocator, "{s}/{s}", .{ container, blob });
         defer self.allocator.free(key);
 
-        if (self.extent_store.get(key)) |existing| {
-            self.allocator.free(existing.data);
+        // Remove old blob data and key (if exists)
+        if (self.extent_store.fetchRemove(key)) |old| {
+            self.allocator.free(old.value.data);
+            self.allocator.free(old.key);
         }
-        try self.extent_store.put(key, .{
+        try self.extent_store.put(try self.allocator.dupe(u8, key), .{
             .data = try self.allocator.dupe(u8, data),
             .content_type = try self.allocator.dupe(u8, content_type),
             .created_at = now(),
@@ -566,6 +568,7 @@ pub const FileBackend = struct {
 
         if (self.extent_store.fetchRemove(key)) |kv| {
             self.allocator.free(kv.value.data);
+            self.allocator.free(kv.key);
         }
     }
 
@@ -768,6 +771,7 @@ pub const FileBackend = struct {
         var it = self.extent_store.iterator();
         while (it.next()) |entry| {
             self.allocator.free(entry.value_ptr.data);
+            self.allocator.free(entry.key_ptr.*);
         }
         self.extent_store.deinit();
         self.block_store.deinit();

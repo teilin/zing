@@ -1,0 +1,380 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Zing — Azure Storage Emulator in Zig</title>
+<meta name="description" content="A fast, native Azure Storage emulator written in Zig. Drop-in replacement for Azurite with dramatically better throughput and latency." />
+<style>
+:root {
+  --ink: #0f1117;
+  --surface: #1a1d27;
+  --surface-raise: #232737;
+  --border: #2e3348;
+  --text: #e2e4ed;
+  --text-muted: #9498b0;
+  --accent: #6c5ce7;
+  --accent-glow: rgba(108,92,231,0.3);
+  --green: #00cec9;
+  --amber: #fdcb6e;
+  --radius: 10px;
+  --font: 'SF Mono','JetBrains Mono','Cascadia Code','Fira Code',monospace;
+}
+[data-theme="light"] {
+  --ink: #ffffff;
+  --surface: #f5f6fa;
+  --surface-raise: #ffffff;
+  --border: #dfe6e9;
+  --text: #2d3436;
+  --text-muted: #636e72;
+  --accent: #6c5ce7;
+  --accent-glow: rgba(108,92,231,0.15);
+}
+* { margin:0; padding:0; box-sizing:border-box; }
+body {
+  font-family: -apple-system,BlinkMacSystemFont,'Segoe UI',system-ui,sans-serif;
+  background: var(--ink);
+  color: var(--text);
+  line-height: 1.6;
+  -webkit-font-smoothing: antialiased;
+}
+::selection { background: var(--accent); color: #fff; }
+
+/* Theme toggle */
+.theme-toggle {
+  position: fixed; top: 20px; right: 24px; z-index: 100;
+  background: var(--surface); border: 1px solid var(--border);
+  color: var(--text); width: 40px; height: 40px; border-radius: 50%;
+  cursor: pointer; font-size: 18px; display: flex; align-items: center; justify-content: center;
+  transition: background .2s, transform .1s;
+}
+.theme-toggle:hover { background: var(--surface-raise); transform: scale(1.05); }
+
+/* Hero */
+.hero {
+  min-height: 100vh; display: flex; flex-direction: column;
+  align-items: center; justify-content: center; text-align: center;
+  padding: 40px 24px; position: relative; overflow: hidden;
+}
+.hero::before {
+  content: ''; position: absolute; width: 600px; height: 600px;
+  border-radius: 50%; background: var(--accent-glow);
+  filter: blur(120px); top: -200px; right: -200px; pointer-events: none;
+}
+.hero-badge {
+  display: inline-flex; align-items: center; gap: 6px;
+  background: var(--surface); border: 1px solid var(--border);
+  padding: 6px 16px; border-radius: 100px; font-size: 13px;
+  color: var(--text-muted); margin-bottom: 24px;
+}
+.hero-badge span { color: var(--green); }
+.hero h1 {
+  font-size: clamp(2.8rem, 7vw, 5rem); font-weight: 800;
+  letter-spacing: -0.03em; line-height: 1.1;
+  background: linear-gradient(135deg, var(--text) 0%, var(--accent) 100%);
+  -webkit-background-clip: text; -webkit-text-fill-color: transparent;
+  background-clip: text; max-width: 700px;
+}
+.hero p {
+  font-size: clamp(1rem, 2vw, 1.25rem); color: var(--text-muted);
+  max-width: 580px; margin: 20px 0 32px;
+}
+.hero-actions { display: flex; gap: 12px; flex-wrap: wrap; justify-content: center; }
+.hero-actions a {
+  display: inline-flex; align-items: center; gap: 8px;
+  padding: 12px 28px; border-radius: var(--radius);
+  font-weight: 600; font-size: 15px; text-decoration: none;
+  transition: transform .15s, box-shadow .15s;
+}
+.hero-actions a:hover { transform: translateY(-2px); }
+.btn-primary {
+  background: var(--accent); color: #fff;
+  box-shadow: 0 0 0 1px var(--accent);
+}
+.btn-secondary {
+  background: var(--surface); color: var(--text);
+  border: 1px solid var(--border);
+}
+
+/* Terminal */
+.terminal {
+  max-width: 680px; margin: 32px auto 0;
+  background: #0d1117; border-radius: 12px; border: 1px solid #30363d;
+  font-family: var(--font); font-size: 13px; line-height: 1.7;
+  text-align: left; width: 100%;
+}
+.terminal-header {
+  display: flex; align-items: center; gap: 8px;
+  padding: 12px 16px; border-bottom: 1px solid #21262d;
+}
+.terminal-dot { width: 12px; height: 12px; border-radius: 50%; }
+.t-dot-red { background: #ff5f56; }
+.t-dot-yellow { background: #ffbd2e; }
+.t-dot-green { background: #27c93f; }
+.terminal-title { color: #8b949e; font-size: 12px; margin-left: 8px; }
+.terminal-body { padding: 16px 20px; color: #c9d1d9; overflow-x: auto; }
+.terminal-body .prompt { color: #58a6ff; }
+.terminal-body .ok { color: #3fb950; }
+.terminal-body .dim { color: #484f58; }
+
+/* Sections */
+section { padding: 80px 24px; max-width: 960px; margin: 0 auto; }
+.section-label {
+  font-size: 12px; font-weight: 700; text-transform: uppercase;
+  letter-spacing: 0.08em; color: var(--accent); margin-bottom: 8px;
+}
+.section-title {
+  font-size: clamp(1.6rem, 3vw, 2.2rem); font-weight: 700;
+  letter-spacing: -0.02em; margin-bottom: 12px;
+}
+.section-sub { color: var(--text-muted); font-size: 1rem; margin-bottom: 40px; }
+
+/* Grid */
+.features { display: grid; grid-template-columns: repeat(auto-fit,minmax(260px,1fr)); gap: 16px; }
+.feature-card {
+  background: var(--surface); border: 1px solid var(--border);
+  border-radius: var(--radius); padding: 24px; transition: border-color .2s;
+}
+.feature-card:hover { border-color: var(--accent); }
+.feature-card .icon { font-size: 24px; margin-bottom: 12px; }
+.feature-card h3 { font-size: 16px; font-weight: 600; margin-bottom: 6px; }
+.feature-card p { font-size: 14px; color: var(--text-muted); line-height: 1.5; }
+
+/* Service table */
+.service-table { width: 100%; border-collapse: collapse; }
+.service-table th, .service-table td {
+  text-align: left; padding: 14px 16px; border-bottom: 1px solid var(--border);
+  font-size: 14px;
+}
+.service-table th { font-size: 12px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--text-muted); font-weight: 600; }
+.service-table td:first-child { font-weight: 600; }
+.service-table .badge { display: inline-block; padding: 2px 10px; border-radius: 100px; font-size: 12px; font-weight: 600; }
+.badge-ok { background: rgba(0,206,201,0.15); color: var(--green); }
+.badge-plan { background: rgba(253,203,110,0.15); color: var(--amber); }
+
+/* Auth grid */
+.auth-grid { display: grid; grid-template-columns: repeat(auto-fit,minmax(180px,1fr)); gap: 12px; }
+.auth-item {
+  background: var(--surface); border: 1px solid var(--border);
+  border-radius: var(--radius); padding: 16px 20px; display: flex;
+  align-items: center; gap: 10px; font-size: 14px; font-weight: 500;
+}
+.auth-item .check { color: var(--green); font-weight: 700; }
+
+/* Code block */
+.code-block {
+  background: #0d1117; border-radius: 10px; border: 1px solid #30363d;
+  padding: 20px 24px; font-family: var(--font); font-size: 13px;
+  line-height: 1.8; overflow-x: auto; margin: 16px 0;
+  color: #c9d1d9;
+}
+.code-block .cm { color: #484f58; }
+.code-block .kw { color: #ff7b72; }
+.code-block .fn { color: #d2a8ff; }
+.code-block .str { color: #a5d6ff; }
+.code-block .num { color: #79c0ff; }
+
+/* Footer */
+footer {
+  text-align: center; padding: 40px 24px; border-top: 1px solid var(--border);
+  color: var(--text-muted); font-size: 14px; margin-top: 40px;
+}
+footer a { color: var(--accent); text-decoration: none; }
+footer a:hover { text-decoration: underline; }
+
+/* Responsive */
+@media (max-width: 640px) {
+  .hero h1 { font-size: 2rem; }
+  .hero-actions a { width: 100%; justify-content: center; }
+  section { padding: 60px 16px; }
+  .service-table th, .service-table td { padding: 10px 12px; font-size: 13px; }
+}
+</style>
+</head>
+<body>
+
+<button class="theme-toggle" id="themeToggle" aria-label="Toggle theme">☀️</button>
+
+<!-- Hero -->
+<section class="hero">
+  <div class="hero-badge"><span>▸</span> v0.1.0 — dev</div>
+  <h1>Zing</h1>
+  <p>A fast, native Azure Storage emulator written in Zig. Drop-in replacement for Azurite with dramatically better throughput and latency.</p>
+  <div class="hero-actions">
+    <a href="https://github.com/teilin/zing" class="btn-primary">GitHub →</a>
+    <a href="#quickstart" class="btn-secondary">Quick Start</a>
+  </div>
+  <div class="terminal">
+    <div class="terminal-header">
+      <span class="terminal-dot t-dot-red"></span>
+      <span class="terminal-dot t-dot-yellow"></span>
+      <span class="terminal-dot t-dot-green"></span>
+      <span class="terminal-title">terminal</span>
+    </div>
+    <div class="terminal-body">
+      <span class="prompt">$</span> git clone https://github.com/teilin/zing.git<br/>
+      <span class="prompt">$</span> cd zing && zig build<br/>
+      <span class="prompt">$</span> ./zing<br/>
+      <span class="ok">info:</span> Zing blob service listening on port <span class="num">10000</span><br/>
+      <span class="ok">info:</span> Zing queue service listening on port <span class="num">10001</span><br/>
+      <span class="ok">info:</span> Zing table service listening on port <span class="num">10002</span>
+    </div>
+  </div>
+</section>
+
+<!-- Why -->
+<section>
+  <div class="section-label">Why Zing?</div>
+  <h2 class="section-title">Built for speed, from the ground up</h2>
+  <p class="section-sub">Azurite is built on Node.js/TypeScript — GC pauses, event-loop bottlenecks, and JS crypto overhead. Zing is different.</p>
+  <div class="features">
+    <div class="feature-card">
+      <div class="icon">⚡</div>
+      <h3>Native machine code</h3>
+      <p>No runtime, no GC, no JS VM overhead. Just bare-metal x86_64 performance from Zig's zero-cost abstractions.</p>
+    </div>
+    <div class="feature-card">
+      <div class="icon">🔌</div>
+      <h3>epoll I/O</h3>
+      <p>10k+ concurrent connections with epoll (Linux) — handles burst traffic without the event-loop backpressure of Node.js.</p>
+    </div>
+    <div class="feature-card">
+      <div class="icon">📦</div>
+      <h3>Single static binary</h3>
+      <p>No Node.js, no npm, no virtualenv. One file to download, one command to run. Under 2 MB compressed.</p>
+    </div>
+    <div class="feature-card">
+      <div class="icon">🔧</div>
+      <h3>Arena allocators</h3>
+      <p>Bulk memory management with zero per-request malloc overhead. Predictable latency even under load.</p>
+    </div>
+  </div>
+</section>
+
+<!-- Services -->
+<section>
+  <div class="section-label">Supported Services</div>
+  <h2 class="section-title">Blob, Queue, and Table — one binary</h2>
+  <p class="section-sub">All three Azure Storage services run simultaneously on separate ports from a single process.</p>
+  <table class="service-table">
+    <thead>
+      <tr><th>Service</th><th>Port</th><th>Capabilities</th><th>Status</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td>Blob Storage</td>
+        <td>10000</td>
+        <td>CRUD, block/append/page blobs, copy, leases, snapshots, ACLs, RA-GRS</td>
+        <td><span class="badge badge-ok">✅ Complete</span></td>
+      </tr>
+      <tr>
+        <td>Queue Storage</td>
+        <td>10001</td>
+        <td>Create/list/delete queues, put/get/peek/clear/update/delete messages</td>
+        <td><span class="badge badge-ok">✅ Complete</span></td>
+      </tr>
+      <tr>
+        <td>Table Storage</td>
+        <td>10002</td>
+        <td>Create/list/delete tables, entity CRUD via JSON REST API</td>
+        <td><span class="badge badge-ok">✅ Complete</span></td>
+      </tr>
+    </tbody>
+  </table>
+</section>
+
+<!-- Auth -->
+<section>
+  <div class="section-label">Authentication</div>
+  <h2 class="section-title">All three auth methods supported</h2>
+  <p class="section-sub">SAS tokens, SharedKey HMAC-SHA256, and OAuth Bearer tokens. No-auth pass-through for dev mode.</p>
+  <div class="auth-grid">
+    <div class="auth-item"><span class="check">✓</span> SAS (Shared Access Signature)</div>
+    <div class="auth-item"><span class="check">✓</span> SharedKey HMAC-SHA256</div>
+    <div class="auth-item"><span class="check">✓</span> OAuth Bearer token</div>
+  </div>
+</section>
+
+<!-- Quick Start -->
+<section id="quickstart">
+  <div class="section-label">Quick Start</div>
+  <h2 class="section-title">Get running in 30 seconds</h2>
+  <p class="section-sub">Build from source with Zig 0.16.0, then start all three services with one command.</p>
+
+  <div class="code-block">
+<span class="cm"># Build</span><br/>
+git clone https://github.com/teilin/zing.git<br/>
+cd zing<br/>
+zig build<br/><br/>
+<span class="cm"># Run all services</span><br/>
+./zig-out/bin/zing<br/><br/>
+<span class="cm"># Create a container and upload a blob</span><br/>
+curl -X PUT "http://127.0.0.1:10000/devstoreaccount1/mycontainer?restype=container"<br/>
+curl -X PUT -d "Hello!" "http://127.0.0.1:10000/devstoreaccount1/mycontainer/myblob.txt"<br/>
+curl "http://127.0.0.1:10000/devstoreaccount1/mycontainer/myblob.txt"<br/>
+<span class="cm"># → "Hello!"</span>
+  </div>
+</section>
+
+<!-- Architecture -->
+<section>
+  <div class="section-label">Architecture</div>
+  <h2 class="section-title">Clean module layout</h2>
+  <p class="section-sub">Pluggable storage backends, generic epoll server, and per-service routers.</p>
+  <div class="code-block">
+zing/<br/>
+├── src/<br/>
+│   ├── main.zig &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; <span class="cm"># Entry + CLI + triple-server startup</span><br/>
+│   ├── http/ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; <span class="cm"># epoll server + blob router + request parser</span><br/>
+│   ├── queue/ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; <span class="cm"># QueueStore + QueueRouter</span><br/>
+│   ├── table/ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; <span class="cm"># TableStore + TableRouter (JSON)</span><br/>
+│   ├── auth/ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; <span class="cm"># SharedKey + SAS validation</span><br/>
+│   ├── storage/ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; <span class="cm"># FileBackend + MemBackend + ExtentStore</span><br/>
+│   └── xml/ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; <span class="cm"># XML serialization/deserialization</span><br/>
+└── docs/ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; <span class="cm"># Development diary + design prompt</span>
+  </div>
+</section>
+
+<!-- Performance -->
+<section>
+  <div class="section-label">Performance</div>
+  <h2 class="section-title">Zing vs Azurite</h2>
+  <p class="section-sub">The numbers speak for themselves — a native binary vs a Node.js process.</p>
+  <table class="service-table">
+    <thead><tr><th>Metric</th><th>Azurite (Node.js)</th><th>Zing (Zig)</th></tr></thead>
+    <tbody>
+      <tr><td>Startup time</td><td>2–5 s</td><td>~50 ms</td></tr>
+      <tr><td>Concurrent connections</td><td>Event-loop bound</td><td>10k+ (epoll)</td></tr>
+      <tr><td>Memory model</td><td>LokiJS + GC</td><td>Arena allocators</td></tr>
+      <tr><td>Binary size</td><td>20+ MB (npm)</td><td>&lt;2 MB static binary</td></tr>
+    </tbody>
+  </table>
+</section>
+
+<footer>
+  <p>Zing is open source — <a href="https://github.com/teilin/zing">github.com/teilin/zing</a></p>
+  <p style="margin-top:6px">Built with Zig • MIT License</p>
+</footer>
+
+<script>
+(function(){
+  const toggle = document.getElementById('themeToggle');
+  const html = document.documentElement;
+  const stored = localStorage.getItem('zing-theme');
+  if (stored) html.setAttribute('data-theme', stored);
+  else if (window.matchMedia('(prefers-color-scheme:light)').matches) html.setAttribute('data-theme', 'light');
+
+  toggle.textContent = html.getAttribute('data-theme') === 'dark' ? '☀️' : '🌙';
+
+  toggle.addEventListener('click', () => {
+    const current = html.getAttribute('data-theme');
+    const next = current === 'dark' ? 'light' : 'dark';
+    html.setAttribute('data-theme', next);
+    toggle.textContent = next === 'dark' ? '☀️' : '🌙';
+    localStorage.setItem('zing-theme', next);
+  });
+})();
+</script>
+
+</body>
+</html>

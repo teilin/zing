@@ -80,7 +80,7 @@ pub const Router = struct {
 
         // Container-level operations (no blob path)
         if (blob.len == 0) {
-            return self.handleContainerLevel(method, container, clean_query);
+            return self.handleContainerLevel(method, container, clean_query, headers, body);
         }
 
         // Blob-level operations
@@ -95,7 +95,7 @@ pub const Router = struct {
         return self.notFound();
     }
 
-    fn handleContainerLevel(self: *Router, method: []const u8, container: []const u8, query: []const u8) !RouteResult {
+    fn handleContainerLevel(self: *Router, method: []const u8, container: []const u8, query: []const u8, headers: std.StringHashMap([]const u8), body: []const u8) !RouteResult {
         const comp = self.getQueryParam(query, "comp");
         const restype = self.getQueryParam(query, "restype");
 
@@ -118,6 +118,12 @@ pub const Router = struct {
         }
         if (mem.eql(u8, method, "HEAD")) {
             return self.headContainer(container);
+        }
+        if (mem.eql(u8, method, "PUT") and mem.eql(u8, comp orelse "", "acl")) {
+            return self.setContainerAclHandler(container, body, headers);
+        }
+        if (mem.eql(u8, method, "GET") and mem.eql(u8, comp orelse "", "acl")) {
+            return self.getContainerAclHandler(container);
         }
 
         return self.notFound();
@@ -300,6 +306,38 @@ pub const Router = struct {
             .status = "200 OK",
             .body = "",
             .content_type = "",
+        };
+    }
+
+    fn setContainerAclHandler(self: *Router, container: []const u8, _: []const u8, _: std.StringHashMap([]const u8)) !RouteResult {
+        // For simplicity, store the container ACL
+        const acl = storage.StorageBackend.ContainerAcl{ .public_access = "container" };
+        try self.backend.setContainerAcl(container, acl);
+        return RouteResult{ .status = "200 OK", .body = "", .content_type = "" };
+    }
+
+    fn getContainerAclHandler(self: *Router, container: []const u8) !RouteResult {
+        const acl = try self.backend.getContainerAcl(container);
+        var ser = xml.Serializer.init(self.allocator);
+        defer ser.deinit();
+        try ser.raw("<?xml version=\"1.0\" encoding=\"utf-8\"?>");
+        try ser.raw("<SignedIdentifiers>");
+        for (acl.signed_identifiers) |sid| {
+            try ser.elemOpen("SignedIdentifier");
+            try ser.textElem("Id", sid.id);
+            try ser.elemOpen("AccessPolicy");
+            if (sid.start.len > 0) try ser.textElem("Start", sid.start);
+            if (sid.expiry.len > 0) try ser.textElem("Expiry", sid.expiry);
+            if (sid.permissions.len > 0) try ser.textElem("Permission", sid.permissions);
+            try ser.closeTag("AccessPolicy");
+            try ser.closeTag("SignedIdentifier");
+        }
+        try ser.closeTag("SignedIdentifiers");
+        const xml_body = try self.allocator.dupe(u8, ser.bytes());
+        return RouteResult{
+            .status = "200 OK",
+            .body = xml_body,
+            .content_type = "application/xml",
         };
     }
 

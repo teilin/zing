@@ -27,6 +27,8 @@ pub const StorageBackend = struct {
         appendBlock: *const fn (ctx: *anyopaque, container: []const u8, blob: []const u8, data: []const u8) anyerror!u64,
         putPage: *const fn (ctx: *anyopaque, container: []const u8, blob: []const u8, data: []const u8, offset: u64) anyerror!void,
         getPageRanges: *const fn (ctx: *anyopaque, container: []const u8, blob: []const u8) anyerror!PageRangesResult,
+        setContainerAcl: *const fn (ctx: *anyopaque, container: []const u8, acl: ContainerAcl) anyerror!void,
+        getContainerAcl: *const fn (ctx: *anyopaque, container: []const u8) anyerror!ContainerAcl,
         close: *const fn (ctx: *anyopaque) void,
     };
 
@@ -79,6 +81,18 @@ pub const StorageBackend = struct {
 
     pub const PageRangesResult = struct {
         page_ranges: []const PageRange = &.{},
+    };
+
+    pub const SignedIdentifier = struct {
+        id: []const u8,
+        start: []const u8,
+        expiry: []const u8,
+        permissions: []const u8,
+    };
+
+    pub const ContainerAcl = struct {
+        public_access: []const u8,
+        signed_identifiers: []const SignedIdentifier = &.{},
     };
 
     pub const BlobItem = struct {
@@ -181,6 +195,14 @@ pub const StorageBackend = struct {
 
     pub fn getPageRanges(self: StorageBackend, container: []const u8, blob: []const u8) !PageRangesResult {
         return self.vtable.getPageRanges(self.ptr, container, blob);
+    }
+
+    pub fn setContainerAcl(self: StorageBackend, container: []const u8, acl: ContainerAcl) !void {
+        return self.vtable.setContainerAcl(self.ptr, container, acl);
+    }
+
+    pub fn getContainerAcl(self: StorageBackend, container: []const u8) !ContainerAcl {
+        return self.vtable.getContainerAcl(self.ptr, container);
     }
 
     pub fn initFile(allocator: std.mem.Allocator, workspace: []const u8) !StorageBackend {
@@ -391,6 +413,7 @@ pub const FileBackend = struct {
     allocator: mem.Allocator,
     extent_store: std.StringHashMap(ExtentData),
     block_store: ExtentStore,
+    acl_store: std.StringHashMap(StorageBackend.ContainerAcl),
 
     pub const ExtentData = struct {
         data: []u8,
@@ -405,6 +428,7 @@ pub const FileBackend = struct {
             .allocator = allocator,
             .extent_store = std.StringHashMap(ExtentData).init(allocator),
             .block_store = ExtentStore.init(allocator),
+            .acl_store = std.StringHashMap(StorageBackend.ContainerAcl).init(allocator),
         };
     }
 
@@ -431,6 +455,8 @@ pub const FileBackend = struct {
                                                 .appendBlock = appendBlock,
                                                 .putPage = putPage,
                                                 .getPageRanges = getPageRanges,
+                                                .setContainerAcl = setContainerAcl,
+                                                .getContainerAcl = getContainerAcl,
                                             },
         };
     }
@@ -781,7 +807,7 @@ pub const FileBackend = struct {
                 .last_modified = 0,
                 .lease_status = "unlocked",
                 .lease_state = "available",
-                .public_access = "",
+                .public_access = (getContainerAcl(@ptrCast(self), container) catch StorageBackend.ContainerAcl{ .public_access = "" }).public_access,
             };
         };
 
@@ -789,7 +815,7 @@ pub const FileBackend = struct {
             .last_modified = dir_stat.st_mtim.tv_sec,
             .lease_status = "unlocked",
             .lease_state = "available",
-            .public_access = "",
+            .public_access = (getContainerAcl(@ptrCast(self), container) catch StorageBackend.ContainerAcl{ .public_access = "" }).public_access,
         };
     }
 
@@ -802,7 +828,25 @@ pub const FileBackend = struct {
         }
         self.extent_store.deinit();
         self.block_store.deinit();
+        self.acl_store.deinit();
         self.allocator.destroy(self);
+    }
+
+    fn setContainerAcl(ctx: *anyopaque, container: []const u8, acl: StorageBackend.ContainerAcl) !void {
+        const self: *FileBackend = @ptrCast(@alignCast(ctx));
+        const key = try std.fmt.allocPrint(self.allocator, "{s}", .{container});
+        defer self.allocator.free(key);
+        try self.acl_store.put(try self.allocator.dupe(u8, key), acl);
+    }
+
+    fn getContainerAcl(ctx: *anyopaque, container: []const u8) !StorageBackend.ContainerAcl {
+        const self: *FileBackend = @ptrCast(@alignCast(ctx));
+        const key = try std.fmt.allocPrint(self.allocator, "{s}", .{container});
+        defer self.allocator.free(key);
+        if (self.acl_store.get(key)) |entry| {
+            return entry;
+        }
+        return StorageBackend.ContainerAcl{ .public_access = "" };
     }
 
     fn stageBlock(ctx: *anyopaque, container: []const u8, blob: []const u8, block_id: []const u8, data: []const u8) !u64 {

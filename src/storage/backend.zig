@@ -24,6 +24,9 @@ pub const StorageBackend = struct {
         stageBlock: *const fn (ctx: *anyopaque, container: []const u8, blob: []const u8, block_id: []const u8, data: []const u8) anyerror!u64,
         commitBlocks: *const fn (ctx: *anyopaque, container: []const u8, blob: []const u8, block_ids: []const []const u8) anyerror!u64,
         getBlockList: *const fn (ctx: *anyopaque, container: []const u8, blob: []const u8) anyerror!BlockListResult,
+        appendBlock: *const fn (ctx: *anyopaque, container: []const u8, blob: []const u8, data: []const u8) anyerror!u64,
+        putPage: *const fn (ctx: *anyopaque, container: []const u8, blob: []const u8, data: []const u8, offset: u64) anyerror!void,
+        getPageRanges: *const fn (ctx: *anyopaque, container: []const u8, blob: []const u8) anyerror!PageRangesResult,
         close: *const fn (ctx: *anyopaque) void,
     };
 
@@ -67,6 +70,15 @@ pub const StorageBackend = struct {
     pub const BlockListResult = struct {
         committed: []const BlockItem = &.{},
         uncommitted: []const BlockItem = &.{},
+    };
+
+    pub const PageRange = struct {
+        start: u64,
+        end: u64,
+    };
+
+    pub const PageRangesResult = struct {
+        page_ranges: []const PageRange = &.{},
     };
 
     pub const BlobItem = struct {
@@ -157,6 +169,18 @@ pub const StorageBackend = struct {
 
     pub fn getBlockList(self: StorageBackend, container: []const u8, blob: []const u8) !BlockListResult {
         return self.vtable.getBlockList(self.ptr, container, blob);
+    }
+
+    pub fn appendBlock(self: StorageBackend, container: []const u8, blob: []const u8, data: []const u8) !u64 {
+        return self.vtable.appendBlock(self.ptr, container, blob, data);
+    }
+
+    pub fn putPage(self: StorageBackend, container: []const u8, blob: []const u8, data: []const u8, offset: u64) !void {
+        return self.vtable.putPage(self.ptr, container, blob, data, offset);
+    }
+
+    pub fn getPageRanges(self: StorageBackend, container: []const u8, blob: []const u8) !PageRangesResult {
+        return self.vtable.getPageRanges(self.ptr, container, blob);
     }
 
     pub fn initFile(allocator: std.mem.Allocator, workspace: []const u8) !StorageBackend {
@@ -401,10 +425,13 @@ pub const FileBackend = struct {
                 .containerExists = containerExists,
                 .containerProperties = containerProperties,
                                 .close = close,
-                                .stageBlock = stageBlock,
-                                .commitBlocks = commitBlocks,
-                                .getBlockList = getBlockList,
-                            },
+                                                .stageBlock = stageBlock,
+                                                .commitBlocks = commitBlocks,
+                                                .getBlockList = getBlockList,
+                                                .appendBlock = appendBlock,
+                                                .putPage = putPage,
+                                                .getPageRanges = getPageRanges,
+                                            },
         };
     }
 
@@ -837,6 +864,66 @@ pub const FileBackend = struct {
             return self.allocator.dupe(u8, "");
         };
         return std.fmt.allocPrint(self.allocator, "\"{d}\"", .{file_stat.st_mtim.tv_sec});
+    }
+
+    fn appendBlock(ctx: *anyopaque, container: []const u8, blob: []const u8, data: []const u8) !u64 {
+        const self: *FileBackend = @ptrCast(@alignCast(ctx));
+        // Read existing blob content, append, write back
+        const existing = try get(ctx, container, blob, null, null);
+        defer self.allocator.free(existing.data);
+        const new_data = try self.allocator.alloc(u8, existing.data.len + data.len);
+        defer self.allocator.free(new_data);
+        @memcpy(new_data[0..existing.data.len], existing.data);
+        @memcpy(new_data[existing.data.len..], data);
+        const ct = if (existing.content_type.len > 0) existing.content_type else "application/octet-stream";
+        _ = try put(ctx, container, blob, new_data, ct);
+        return existing.data.len;
+    }
+
+    fn putPage(ctx: *anyopaque, container: []const u8, blob: []const u8, data: []const u8, offset: u64) !void {
+        const self: *FileBackend = @ptrCast(@alignCast(ctx));
+        if (data.len % 512 != 0) return error.InvalidArgument;
+        if (offset % 512 != 0) return error.InvalidArgument;
+
+        const full_path = try self.pathFor(container, blob);
+        defer self.allocator.free(full_path);
+        const full_path_z = try self.allocator.dupeZ(u8, full_path);
+        defer self.allocator.free(full_path_z);
+
+        // Open or create the file
+        const fd_rc = linux.openat(linux.AT.FDCWD, full_path_z, linux.O{ .ACCMODE = .WRONLY, .CREAT = true }, 0o644);
+        const fd_err = syscallErrno(fd_rc);
+        if (fd_err != null) return errnoToFileError(fd_err.?);
+        const fd: i32 = @intCast(fd_rc);
+        defer _ = linux.close(fd);
+
+        // Seek to the page offset and write
+        const seek_rc = linux.lseek(fd, @intCast(offset), 0); // SEEK_SET
+        if (syscallErrno(seek_rc) != null) return errnoToFileError(syscallErrno(seek_rc).?);
+        const written = linux.write(fd, data.ptr, data.len);
+        if (syscallErrno(written) != null) return errnoToFileError(syscallErrno(written).?);
+    }
+
+    fn getPageRanges(ctx: *anyopaque, container: []const u8, blob: []const u8) !StorageBackend.PageRangesResult {
+        const self: *FileBackend = @ptrCast(@alignCast(ctx));
+        const full_path = try self.pathFor(container, blob);
+        defer self.allocator.free(full_path);
+
+        const file_stat = statPath(self.allocator, full_path) catch {
+            return StorageBackend.PageRangesResult{};
+        };
+        const size: u64 = @intCast(file_stat.st_size);
+        if (size == 0) return StorageBackend.PageRangesResult{};
+
+        var ranges = std.array_list.Managed(StorageBackend.PageRange).init(self.allocator);
+        defer ranges.deinit();
+
+        // For simplicity, report the entire file as one page range (512-byte aligned)
+        try ranges.append(.{ .start = 0, .end = size });
+
+        return StorageBackend.PageRangesResult{
+            .page_ranges = try ranges.toOwnedSlice(),
+        };
     }
 };
 

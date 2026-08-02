@@ -124,6 +124,29 @@ pub const Router = struct {
                     .content_type = "",
                 };
             }
+            if (mem.eql(u8, method, "PUT") and mem.eql(u8, comp.?, "appendblock")) {
+                const offset = try self.backend.appendBlock(container, blob, body);
+                const blob_len = try std.fmt.allocPrint(self.allocator, "{d}", .{offset + body.len});
+                defer self.allocator.free(blob_len);
+                return RouteResult{
+                    .status = "201 Created",
+                    .body = "",
+                    .content_type = "",
+                };
+            }
+            if (mem.eql(u8, method, "PUT") and mem.eql(u8, comp.?, "page")) {
+                const page_offset = self.getQueryParam(query, "offset") orelse "0";
+                const offset = std.fmt.parseInt(u64, page_offset, 10) catch 0;
+                try self.backend.putPage(container, blob, body, offset);
+                return RouteResult{
+                    .status = "201 Created",
+                    .body = "",
+                    .content_type = "",
+                };
+            }
+            if (mem.eql(u8, method, "GET") and mem.eql(u8, comp.?, "pagelist")) {
+                return self.getPageRanges(container, blob);
+            }
             if (mem.eql(u8, method, "PUT") and mem.eql(u8, comp.?, "blocklist")) {
                 return self.putBlockList(container, blob, body);
             }
@@ -283,6 +306,27 @@ pub const Router = struct {
         var ser = xml.Serializer.init(self.allocator);
         defer ser.deinit();
         ser.writeGetBlockListResponse(result) catch return self.internalError();
+        const xml_body = try self.allocator.dupe(u8, ser.bytes());
+        return RouteResult{
+            .status = "200 OK",
+            .body = xml_body,
+            .content_type = "application/xml",
+        };
+    }
+
+    fn getPageRanges(self: *Router, container: []const u8, blob: []const u8) !RouteResult {
+        const result = try self.backend.getPageRanges(container, blob);
+        var ser = xml.Serializer.init(self.allocator);
+        defer ser.deinit();
+        try ser.raw("<?xml version=\"1.0\" encoding=\"utf-8\"?>");
+        try ser.elemOpen("PageList");
+        for (result.page_ranges) |pr| {
+            try ser.elemOpen("PageRange");
+            try ser.textElemInt("Start", pr.start);
+            try ser.textElemInt("End", pr.end);
+            try ser.closeTag("PageRange");
+        }
+        try ser.closeTag("PageList");
         const xml_body = try self.allocator.dupe(u8, ser.bytes());
         return RouteResult{
             .status = "200 OK",

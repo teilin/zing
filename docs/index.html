@@ -3,6 +3,7 @@
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<meta property="og:url" content="https://zing.devgeek.io" />
 <title>Zing — Azure Storage Emulator in Zig</title>
 <meta name="description" content="A fast, native Azure Storage emulator written in Zig. Drop-in replacement for Azurite with dramatically better throughput and latency." />
 <style>
@@ -214,7 +215,7 @@ footer a:hover { text-decoration: underline; }
     <div class="terminal-body">
       <span class="prompt">$</span> git clone https://github.com/teilin/zing.git<br/>
       <span class="prompt">$</span> cd zing && zig build<br/>
-      <span class="prompt">$</span> ./zing<br/>
+      <span class="prompt">$</span> ./zig-out/bin/zing<br/>
       <span class="ok">info:</span> Zing blob service listening on port <span class="num">10000</span><br/>
       <span class="ok">info:</span> Zing queue service listening on port <span class="num">10001</span><br/>
       <span class="ok">info:</span> Zing table service listening on port <span class="num">10002</span>

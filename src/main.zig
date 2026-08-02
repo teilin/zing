@@ -4,6 +4,8 @@ const storage = @import("storage/backend.zig");
 const router_mod = @import("http/router.zig");
 const queue = @import("queue/queue.zig");
 const queue_handler = @import("queue/handlers.zig");
+const table_mod = @import("table/table.zig");
+const table_handler = @import("table/handlers.zig");
 
 fn blobRouteFn(ctx: *anyopaque, method: []const u8, path: []const u8, query: []const u8, headers: std.StringHashMap([]const u8), body: []const u8, allocator: std.mem.Allocator) http.RouteResult {
     const router: *router_mod.Router = @ptrCast(@alignCast(ctx));
@@ -17,6 +19,16 @@ fn blobRouteFn(ctx: *anyopaque, method: []const u8, path: []const u8, query: []c
 
 fn queueRouteFn(ctx: *anyopaque, method: []const u8, path: []const u8, query: []const u8, headers: std.StringHashMap([]const u8), body: []const u8, allocator: std.mem.Allocator) http.RouteResult {
     const router: *queue_handler.QueueRouter = @ptrCast(@alignCast(ctx));
+    if (router.route(method, path, query, headers, body)) |result| {
+        return .{ .status = result.status, .body = result.body, .content_type = result.content_type };
+    } else |_| {
+        _ = allocator;
+        return .{ .status = "500 Internal Server Error", .body = "Internal Server Error", .content_type = "text/plain" };
+    }
+}
+
+fn tableRouteFn(ctx: *anyopaque, method: []const u8, path: []const u8, query: []const u8, headers: std.StringHashMap([]const u8), body: []const u8, allocator: std.mem.Allocator) http.RouteResult {
+    const router: *table_handler.TableRouter = @ptrCast(@alignCast(ctx));
     if (router.route(method, path, query, headers, body)) |result| {
         return .{ .status = result.status, .body = result.body, .content_type = result.content_type };
     } else |_| {
@@ -75,34 +87,42 @@ pub fn main(init: std.process.Init.Minimal) !void {
     var queue_store = queue.QueueStore.init(q_allocator);
     defer queue_store.deinit();
 
+    // Initialize table store
+    var table_store = table_mod.TableStore.init(q_allocator);
+    defer table_store.deinit();
+
     // Initialize routers
     var blob_router = router_mod.Router.init(blob_allocator, blob_backend);
     var q_router = queue_handler.QueueRouter.init(q_allocator, &queue_store);
+    var t_router = table_handler.TableRouter.init(q_allocator, &table_store);
 
-    // Start blob server (background thread)
+    // Start servers as background threads
+    const Thread = std.Thread;
+
     var blob_server = try http.Server.init(blob_allocator, blob_port, &blob_router, blobRouteFn);
     defer blob_server.deinit();
     std.log.info("Zing blob service listening on port {}", .{blob_port});
-
-    // Start queue server (background thread)
-    var q_server = try http.Server.init(q_allocator, queue_port, &q_router, queueRouteFn);
-    defer q_server.deinit();
-    std.log.info("Zing queue service listening on port {}", .{queue_port});
-
-    // Run blob server in background thread, queue server on main thread
-    const Thread = std.Thread;
     const blob_thread = try Thread.spawn(.{}, struct {
-        fn run(srv: *http.Server) !void {
-            srv.listen() catch |err| {
-                std.log.err("blob server exited: {}", .{err});
-            };
-        }
+        fn run(srv: *http.Server) !void { srv.listen() catch |err| std.log.err("blob exited: {}", .{err}); }
     }.run, .{blob_server});
     errdefer blob_thread.detach();
 
-    q_server.listen() catch |err| {
-        std.log.err("queue server exited: {}", .{err});
+    var q_server = try http.Server.init(q_allocator, queue_port, &q_router, queueRouteFn);
+    defer q_server.deinit();
+    std.log.info("Zing queue service listening on port {}", .{queue_port});
+    const q_thread = try Thread.spawn(.{}, struct {
+        fn run(srv: *http.Server) !void { srv.listen() catch |err| std.log.err("queue exited: {}", .{err}); }
+    }.run, .{q_server});
+    errdefer q_thread.detach();
+
+    // Table server on main thread
+    var t_server = try http.Server.init(q_allocator, 10002, &t_router, tableRouteFn);
+    defer t_server.deinit();
+    std.log.info("Zing table service listening on port 10002", .{});
+    t_server.listen() catch |err| {
+        std.log.err("table server exited: {}", .{err});
     };
 
     blob_thread.join();
+    q_thread.join();
 }

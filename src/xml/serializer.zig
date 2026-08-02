@@ -78,7 +78,7 @@ pub const Serializer = struct {
     // ── Low-level XML helpers ───────────────────────────────────────────
 
     /// Write a literal string directly into the buffer.
-    fn raw(self: *Serializer, s: []const u8) !void {
+    pub fn raw(self: *Serializer, s: []const u8) !void {
         try self.buf.appendSlice(s);
     }
 
@@ -108,23 +108,23 @@ pub const Serializer = struct {
     }
 
     /// Write a full start element with attributes, then close: `<name attrs>`.
-    fn elemOpen(self: *Serializer, name: []const u8) !void {
+    pub fn elemOpen(self: *Serializer, name: []const u8) !void {
         try self.openTag(name);
         try self.closeOpenTag();
     }
 
     /// Write a closing element: `</name>`.
-    fn closeTag(self: *Serializer, name: []const u8) !void {
+    pub fn closeTag(self: *Serializer, name: []const u8) !void {
         try self.buf.print("</{s}>", .{name});
     }
 
     /// Write a simple text element: `<name>value</name>`.
-    fn textElem(self: *Serializer, name: []const u8, value: []const u8) !void {
+    pub fn textElem(self: *Serializer, name: []const u8, value: []const u8) !void {
         try self.buf.print("<{s}>{s}</{s}>", .{ name, xmlEscape(value), name });
     }
 
     /// Write a simple integer element: `<name>value</name>`.
-    fn textElemInt(self: *Serializer, name: []const u8, value: u64) !void {
+    pub fn textElemInt(self: *Serializer, name: []const u8, value: u64) !void {
         try self.buf.print("<{s}>{d}</{s}>", .{ name, value, name });
     }
 

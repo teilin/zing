@@ -4,13 +4,18 @@ const builtin = @import("builtin");
 const mem = std.mem;
 
 const Request = @import("request.zig").Request;
-const Router = @import("router.zig").Router;
+
+pub const RouteResult = struct { status: []const u8, body: []const u8, content_type: []const u8 };
+
+/// Function type for request handling. Returns (status, body, content_type).
+const RouteFn = *const fn (anyopaque: *anyopaque, method: []const u8, path: []const u8, query: []const u8, headers: std.StringHashMap([]const u8), body: []const u8, allocator: std.mem.Allocator) RouteResult;
 
 pub const Server = struct {
-    allocator: mem.Allocator,
+    allocator: std.mem.Allocator,
     sock: c.fd_t,
     port: u16,
-    router: *anyopaque,
+    handle_ctx: *anyopaque,
+    route_fn: RouteFn,
 
     fn cErr(errno_val: c_int) anyerror {
         return switch (errno_val) {
@@ -42,7 +47,7 @@ pub const Server = struct {
         };
     }
 
-    pub fn init(allocator: mem.Allocator, port: u16, store: *anyopaque) !*Server {
+    pub fn init(allocator: mem.Allocator, port: u16, ctx: *anyopaque, route_fn: RouteFn) !*Server {
         const self = try allocator.create(Server);
 
         const sock = c.socket(c.AF.INET, @as(c_int, 1) | @as(c_int, 0o4000), 0);
@@ -78,7 +83,8 @@ pub const Server = struct {
             .allocator = allocator,
             .sock = sock,
             .port = port,
-            .router = store,
+            .handle_ctx = ctx,
+            .route_fn = route_fn,
         };
         return self;
     }
@@ -164,18 +170,13 @@ pub const Server = struct {
         defer req.deinit();
 
         // Build response via router
-        const router: *Router = @ptrCast(@alignCast(self.router));
         var body: []const u8 = "ok";
         var status: []const u8 = "200 OK";
         var content_type: []const u8 = "text/plain";
-        if (router.route(req.method, req.path, req.query, req.headers, req.body)) |result| {
-            body = result.body;
-            status = result.status;
-            content_type = result.content_type;
-        } else |_| {
-            status = "500 Internal Server Error";
-            body = "Internal Server Error";
-        }
+        const result = self.route_fn(self.handle_ctx, req.method, req.path, req.query, req.headers, req.body, self.allocator);
+        body = result.body;
+        status = result.status;
+        content_type = result.content_type;
         const hdr = try std.fmt.allocPrint(self.allocator,
             "HTTP/1.1 {s}\r\nContent-Type: {s}\r\nContent-Length: {d}\r\nConnection: {s}\r\n\r\n",
             .{ status, content_type, body.len, if (req.keep_alive) "keep-alive" else "close" },

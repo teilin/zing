@@ -29,6 +29,8 @@ pub const StorageBackend = struct {
         getPageRanges: *const fn (ctx: *anyopaque, container: []const u8, blob: []const u8) anyerror!PageRangesResult,
         setContainerAcl: *const fn (ctx: *anyopaque, container: []const u8, acl: ContainerAcl) anyerror!void,
         getContainerAcl: *const fn (ctx: *anyopaque, container: []const u8) anyerror!ContainerAcl,
+        createSnapshot: *const fn (ctx: *anyopaque, container: []const u8, blob: []const u8, data: []const u8, content_type: []const u8) anyerror![]const u8,
+        deleteSnapshot: *const fn (ctx: *anyopaque, container: []const u8, blob_snap: []const u8) anyerror!void,
         close: *const fn (ctx: *anyopaque) void,
     };
 
@@ -203,6 +205,14 @@ pub const StorageBackend = struct {
 
     pub fn getContainerAcl(self: StorageBackend, container: []const u8) !ContainerAcl {
         return self.vtable.getContainerAcl(self.ptr, container);
+    }
+
+    pub fn createSnapshot(self: StorageBackend, container: []const u8, blob: []const u8, data: []const u8, content_type: []const u8) ![]const u8 {
+        return self.vtable.createSnapshot(self.ptr, container, blob, data, content_type);
+    }
+
+    pub fn deleteSnapshot(self: StorageBackend, container: []const u8, blob_snap: []const u8) !void {
+        return self.vtable.deleteSnapshot(self.ptr, container, blob_snap);
     }
 
     pub fn initFile(allocator: std.mem.Allocator, workspace: []const u8) !StorageBackend {
@@ -457,6 +467,8 @@ pub const FileBackend = struct {
                                                 .getPageRanges = getPageRanges,
                                                 .setContainerAcl = setContainerAcl,
                                                 .getContainerAcl = getContainerAcl,
+                                                .createSnapshot = createSnapshot,
+                                                .deleteSnapshot = deleteSnapshot,
                                             },
         };
     }
@@ -847,6 +859,25 @@ pub const FileBackend = struct {
             return entry;
         }
         return StorageBackend.ContainerAcl{ .public_access = "" };
+    }
+
+    fn createSnapshot(ctx: *anyopaque, container: []const u8, blob: []const u8, data: []const u8, content_type: []const u8) ![]const u8 {
+        const self: *FileBackend = @ptrCast(@alignCast(ctx));
+        const now_sec: i64 = blk: {
+            var ts: std.os.linux.timespec = undefined;
+            _ = std.os.linux.clock_gettime(.REALTIME, &ts);
+            break :blk @as(i64, @intCast(ts.sec));
+        };
+        const snap_id = try std.fmt.allocPrint(self.allocator, "{d}-{d}", .{ now_sec, @mod(now_sec * 314159, 1000000) });
+        errdefer self.allocator.free(snap_id);
+        const snap_key = try std.fmt.allocPrint(self.allocator, "{s}@@{s}", .{ blob, snap_id });
+        defer self.allocator.free(snap_key);
+        _ = try put(ctx, container, snap_key, data, content_type);
+        return snap_id;
+    }
+
+    fn deleteSnapshot(ctx: *anyopaque, container: []const u8, blob_snap: []const u8) !void {
+        return delete(ctx, container, blob_snap);
     }
 
     fn stageBlock(ctx: *anyopaque, container: []const u8, blob: []const u8, block_id: []const u8, data: []const u8) !u64 {

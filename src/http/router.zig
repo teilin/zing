@@ -132,8 +132,11 @@ pub const Router = struct {
     fn handleBlobLevel(self: *Router, method: []const u8, container: []const u8, blob: []const u8, query: []const u8, headers: std.StringHashMap([]const u8), body: []const u8) !RouteResult {
         const comp = self.getQueryParam(query, "comp");
 
-        // Block blob operations
+        // Comp-based operations
         if (comp != null) {
+            if (mem.eql(u8, method, "PUT") and mem.eql(u8, comp.?, "snapshot")) {
+                return self.createSnapshotHandler(container, blob);
+            }
             if (mem.eql(u8, method, "PUT") and mem.eql(u8, comp.?, "lease")) {
                 return self.handleLease(container, blob, headers);
             }
@@ -147,9 +150,7 @@ pub const Router = struct {
                 };
             }
             if (mem.eql(u8, method, "PUT") and mem.eql(u8, comp.?, "appendblock")) {
-                const offset = try self.backend.appendBlock(container, blob, body);
-                const blob_len = try std.fmt.allocPrint(self.allocator, "{d}", .{offset + body.len});
-                defer self.allocator.free(blob_len);
+                _ = try self.backend.appendBlock(container, blob, body);
                 return RouteResult{
                     .status = "201 Created",
                     .body = "",
@@ -177,22 +178,28 @@ pub const Router = struct {
             }
         }
 
+        // Resolve snapshot key: if ?snapshot=xxx, use {blob}@@{snap_id}
+        const snap_id = self.getQueryParam(query, "snapshot");
+        const blob_key = if (snap_id) |sid| blk: {
+            break :blk try std.fmt.allocPrint(self.allocator, "{s}@@{s}", .{ blob, sid });
+        } else blob;
+
         // Standard blob CRUD — check for Copy Blob first
         if (mem.eql(u8, method, "PUT")) {
             // Copy Blob: PUT with x-ms-copy-source header
             if (headers.get("x-ms-copy-source")) |source| {
                 return self.copyBlob(container, blob, source);
             }
-            return self.putBlob(container, blob, body);
+            return self.putBlob(container, blob_key, body);
         }
         if (mem.eql(u8, method, "GET")) {
-            return self.getBlob(container, blob);
+            return self.getBlob(container, blob_key);
         }
         if (mem.eql(u8, method, "HEAD")) {
-            return self.headBlob(container, blob);
+            return self.headBlob(container, blob_key);
         }
         if (mem.eql(u8, method, "DELETE")) {
-            return self.deleteBlob(container, blob);
+            return self.deleteBlob(container, blob_key);
         }
         return self.notFound();
     }
@@ -466,6 +473,18 @@ pub const Router = struct {
             };
         }
         return self.badRequest("unknown lease action");
+    }
+
+    fn createSnapshotHandler(self: *Router, container: []const u8, blob: []const u8) !RouteResult {
+        const src_result = try self.backend.get(container, blob, null, null);
+        defer self.allocator.free(src_result.data);
+        const snap_id = try self.backend.createSnapshot(container, blob, src_result.data, src_result.content_type);
+        const body = try self.allocator.dupe(u8, snap_id);
+        return RouteResult{
+            .status = "201 Created",
+            .body = body,
+            .content_type = "text/plain",
+        };
     }
 
     fn copyBlob(self: *Router, dst_container: []const u8, dst_blob: []const u8, source: []const u8) !RouteResult {

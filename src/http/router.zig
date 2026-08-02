@@ -71,7 +71,7 @@ pub const Router = struct {
         }
 
         // Blob-level operations
-        return self.handleBlobLevel(method, container, blob, clean_query, body);
+        return self.handleBlobLevel(method, container, blob, clean_query, headers, body);
     }
 
     fn handleAccountLevel(self: *Router, method: []const u8, query: []const u8) !RouteResult {
@@ -110,7 +110,7 @@ pub const Router = struct {
         return self.notFound();
     }
 
-    fn handleBlobLevel(self: *Router, method: []const u8, container: []const u8, blob: []const u8, query: []const u8, body: []const u8) !RouteResult {
+    fn handleBlobLevel(self: *Router, method: []const u8, container: []const u8, blob: []const u8, query: []const u8, headers: std.StringHashMap([]const u8), body: []const u8) !RouteResult {
         const comp = self.getQueryParam(query, "comp");
 
         // Block blob operations
@@ -155,8 +155,12 @@ pub const Router = struct {
             }
         }
 
-        // Standard blob CRUD
-        if (mem.eql(u8, method, "PUT") or mem.eql(u8, method, "PUT")) {
+        // Standard blob CRUD — check for Copy Blob first
+        if (mem.eql(u8, method, "PUT")) {
+            // Copy Blob: PUT with x-ms-copy-source header
+            if (headers.get("x-ms-copy-source")) |source| {
+                return self.copyBlob(container, blob, source);
+            }
             return self.putBlob(container, blob, body);
         }
         if (mem.eql(u8, method, "GET")) {
@@ -332,6 +336,38 @@ pub const Router = struct {
             .status = "200 OK",
             .body = xml_body,
             .content_type = "application/xml",
+        };
+    }
+
+    fn copyBlob(self: *Router, dst_container: []const u8, dst_blob: []const u8, source: []const u8) !RouteResult {
+        // Parse the copy source URL: /{account}/{container}/{blob} or full URL
+        // Azure format: /{account}/{container}/{blob} or http://host/{account}/{container}/{blob}
+        const src_path = if (mem.indexOf(u8, source, "://")) |scheme_end| blk: {
+            // Full URL — find the path after host
+            const after_scheme = source[scheme_end + 3..];
+            const host_end = mem.indexOfScalar(u8, after_scheme, '/') orelse return self.badRequest("invalid copy source");
+            break :blk after_scheme[host_end..];
+        } else source;
+
+        var segments = mem.splitScalar(u8, src_path, '/');
+        _ = segments.next(); // skip leading empty
+        _ = segments.next(); // skip account name
+        const src_container = segments.next() orelse return self.badRequest("invalid copy source: no container");
+        const src_blob = segments.rest();
+        if (src_blob.len == 0) return self.badRequest("invalid copy source: no blob");
+
+        // Read source blob
+        const src_result = try self.backend.get(src_container, src_blob, null, null);
+        defer self.allocator.free(src_result.data);
+
+        // Write to destination
+        self.backend.createContainer(dst_container) catch {};
+        _ = try self.backend.put(dst_container, dst_blob, src_result.data, src_result.content_type);
+
+        return RouteResult{
+            .status = "202 Accepted",
+            .body = "",
+            .content_type = "",
         };
     }
 

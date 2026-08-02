@@ -1,5 +1,4 @@
 const std = @import("std");
-const crypto = std.crypto;
 const mem = std.mem;
 
 /// SharedKey authentication validator for Azure Storage.
@@ -37,23 +36,24 @@ pub const SharedKey = struct {
         query: ?[]const u8,
     ) !void {
         // Decode the Base64 account key
-        const decoded_key = try allocator.alloc(u8, 64);
+        const decoded_key_len = try std.base64.standard.Decoder.calcSizeForSlice(account_key);
+        const decoded_key = try allocator.alloc(u8, decoded_key_len);
         defer allocator.free(decoded_key);
-        const key_len = try std.base64.standard.Decoder.decode(decoded_key, account_key);
-        const key = decoded_key[0..key_len];
+        try std.base64.standard.Decoder.decode(decoded_key, account_key);
 
         // Build canonicalized string
         const canonical = try buildCanonicalString(allocator, account_name, expected_verb, headers, path, query);
         defer allocator.free(canonical);
 
-        // Compute HMAC-SHA256
-        const hmac = crypto.auth.hmacSha256;
-        const signature = hmac.create(key, canonical);
+        // Compute HMAC-SHA256 using std.crypto.auth.hmac.sha2
+        const HmacSha256 = std.crypto.auth.hmac.sha2.HmacSha256;
+        var mac: [HmacSha256.mac_length]u8 = undefined;
+        HmacSha256.create(&mac, canonical, decoded_key[0..decoded_key_len]);
 
         // Encode computed signature as Base64
-        const sig_encoded = try allocator.alloc(u8, std.base64.standard.Encoder.calcSize(signature.len));
+        const sig_encoded = try allocator.alloc(u8, std.base64.standard.Encoder.calcSize(mac.len));
         defer allocator.free(sig_encoded);
-        std.base64.standard.Encoder.encode(sig_encoded, &signature);
+        _ = std.base64.standard.Encoder.encode(sig_encoded, &mac);
 
         // Compare with provided authorization header
         const auth_sig = try extractSignatureFromAuthHeader(allocator, headers.authorization);
@@ -181,10 +181,10 @@ pub const SharedKey = struct {
 
         for (sorted.items, 0..) |param, i| {
             if (i > 0) try result.append('&');
-            try result.writer().print("{s}", .{param.name});
+            try result.appendSlice(param.name);
             if (param.value.len > 0) {
                 try result.append('=');
-                try result.writer().print("{s}", .{param.value});
+                try result.appendSlice(param.value);
             }
         }
 

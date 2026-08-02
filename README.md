@@ -19,6 +19,8 @@ Azurite is built on Node.js/TypeScript — which means GC pauses, event-loop bot
 | Blob Storage | 10000 | ✅ **Blob CRUD** — PUT, GET, HEAD, DELETE |
 | Container management | 10000 | ✅ **Container CRUD** — Create, List, Delete |
 | Block blob assembly | 10000 | ✅ **PUT BLOCK / PUT BLOCK LIST / GET BLOCK LIST** |
+| Append Blobs | 10000 | ✅ **APPEND BLOCK** — `?comp=appendblock` |
+| Page Blobs | 10000 | ✅ **PUT PAGE / GET PAGE RANGES** — `?comp=page&offset=N`, `?comp=pagelist` |
 | Queue Storage | 10001 | ✅ **Create/list/delete queues, put/get/peek/clear messages** |
 | Table Storage | 10002 | 🚧 Planned |
 
@@ -79,6 +81,19 @@ curl "http://127.0.0.1:10000/devstoreaccount1/mycontainer/myblob.txt?comp=blockl
 curl -X PUT -d '<?xml version="1.0" encoding="utf-8"?><BlockList><Latest><Block><Name>YmxvY2sx</Name></Block><Block><Name>YmxvY2sy</Name></Block></Latest></BlockList>' \
   "http://127.0.0.1:10000/devstoreaccount1/mycontainer/myblob.txt?comp=blocklist"
 
+# Blob Append block
+curl -X PUT -d "First piece" "http://127.0.0.1:10000/devstoreaccount1/mycontainer/append.txt?comp=appendblock"
+curl -X PUT -d "Second piece" "http://127.0.0.1:10000/devstoreaccount1/mycontainer/append.txt?comp=appendblock"
+
+# Blob Write page (512-byte aligned)
+curl -X PUT -d "$(python3 -c 'print("A" * 512)' 2>/dev/null || printf 'A%.0s' {1..512})" \
+  "http://127.0.0.1:10000/devstoreaccount1/mycontainer/page.txt?comp=page&offset=0"
+
+# Blob List page ranges
+curl "http://127.0.0.1:10000/devstoreaccount1/mycontainer/page.txt?comp=pagelist"
+
+# Blob Authenticated request (SharedKey)
+
 # Queue: Create a queue
 curl -X PUT "http://127.0.0.1:10001/devstoreaccount1/myqueue"
 
@@ -121,6 +136,9 @@ Zing implements the Azure Storage REST API.
 - `PUT /{container}/{blob}?comp=block&blockid={id}` — Stage an uncommitted block (✅ 201 Created)
 - `PUT /{container}/{blob}?comp=blocklist` — Commit staged blocks into a blob (✅ 201 Created)
 - `GET /{container}/{blob}?comp=blocklist` — List committed/uncommitted blocks (✅ 200 + XML)
+- `PUT /{container}/{blob}?comp=appendblock` — Append to an append blob (✅ 201 Created)
+- `PUT /{container}/{blob}?comp=page&offset={offset}` — Write a 512-byte page (✅ 201 Created)
+- `GET /{container}/{blob}?comp=pagelist` — List page ranges (✅ 200 + XML)
 
 ### Queue Service — Verified Working
 
@@ -142,13 +160,10 @@ Zing implements the Azure Storage REST API.
 
 ### Planned
 
-- Page Blobs (PutPage, ReadPages)
-- Append Blobs
 - Blob Leases
 - Container ACLs and permissions
 - Blob Snapshots / Versions
 - Copy Blob (async copy)
-- SharedKey auth wiring
 - OAuth token validation
 - Table Service (port 10002)
 - RA-GRS secondary

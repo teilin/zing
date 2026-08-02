@@ -37,7 +37,7 @@ pub const Router = struct {
         body: []const u8,
     ) !RouteResult {
         // Authenticate request (SAS or SharedKey)
-        try self.authenticate(method, path, query, headers);
+        try self.authenticate(method, path, query, headers, body);
 
         // Strip SAS query params from the query string before routing.
         // SAS params (sig, se, sv, sp, sr, si, sip, spr) don't overlap with
@@ -384,6 +384,7 @@ pub const Router = struct {
         path: []const u8,
         query: []const u8,
         headers: std.StringHashMap([]const u8),
+        _: []const u8,
     ) !void {
         // Check for SAS token (sig parameter in query string)
         const sig_param = self.getQueryParam(query, "sig");
@@ -397,9 +398,41 @@ pub const Router = struct {
         // Check for SharedKey Authorization header
         const auth_header = headers.get("authorization");
         if (auth_header) |auth| {
-            _ = auth;
-            // For now, skip SharedKey validation to avoid breaking existing clients.
-            // SharedKey.validate() is implemented but needs header plumbing.
+            // Build SharedKey Headers from request headers
+            var sk_headers = shared_key.Headers.init(self.allocator);
+            defer sk_headers.deinit();
+
+            sk_headers.authorization = auth;
+            sk_headers.date = headers.get("date") orelse "";
+            sk_headers.content_length = headers.get("content-length") orelse "";
+            sk_headers.content_type = headers.get("content-type") orelse "";
+            if (headers.get("content-md5")) |v| sk_headers.content_md5 = v;
+            if (headers.get("content-encoding")) |v| sk_headers.content_encoding = v;
+            if (headers.get("content-language")) |v| sk_headers.content_language = v;
+            if (headers.get("if-modified-since")) |v| sk_headers.if_modified_since = v;
+            if (headers.get("if-match")) |v| sk_headers.if_match = v;
+            if (headers.get("if-none-match")) |v| sk_headers.if_none_match = v;
+            if (headers.get("if-unmodified-since")) |v| sk_headers.if_unmodified_since = v;
+            if (headers.get("range")) |v| sk_headers.range = v;
+
+            // Copy x-ms-* headers
+            var hit = headers.iterator();
+            while (hit.next()) |entry| {
+                const name = entry.key_ptr.*;
+                if (name.len > 4 and mem.startsWith(u8, name, "x-ms")) {
+                    try sk_headers.put(name, entry.value_ptr.*);
+                }
+            }
+
+            try shared_key.SharedKey.validate(
+                self.allocator,
+                DEV_ACCOUNT_NAME,
+                DEV_ACCOUNT_KEY,
+                method,
+                &sk_headers,
+                path,
+                query,
+            );
             return;
         }
     }

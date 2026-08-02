@@ -18,8 +18,8 @@ Azurite is built on Node.js/TypeScript — which means GC pauses, event-loop bot
 |---------|------|--------|
 | Blob Storage | 10000 | ✅ **Blob CRUD** — PUT, GET, HEAD, DELETE |
 | Container management | 10000 | ✅ **Container CRUD** — Create, List, Delete |
-| Block blob assembly | 10000 | 🚧 PUT BLOCK LIST / GET BLOCK LIST (in progress) |
-| Queue Storage | 10001 | 🚧 Planned |
+| Block blob assembly | 10000 | ✅ **PUT BLOCK / PUT BLOCK LIST / GET BLOCK LIST** |
+| Queue Storage | 10001 | ✅ **Create/list/delete queues, put/get/peek/clear messages** |
 | Table Storage | 10002 | 🚧 Planned |
 
 ## Quick Start
@@ -34,11 +34,11 @@ git clone https://github.com/teilin/zing.git
 cd zing
 zig build
 
-# Run with defaults (blob port 10000, workspace ./data)
+# Run with defaults (blob port 10000, queue port 10001, workspace ./data)
 ./zig-out/bin/zing
 
 # Custom configuration
-./zig-out/bin/zing --blob-port 10000 --workspace /tmp/zing-data
+./zig-out/bin/zing --blob-port 10000 --queue-port 10001 --workspace /tmp/zing-data
 
 # In-memory mode (no disk I/O, data lost on shutdown)
 ./zig-out/bin/zing --in-memory
@@ -47,26 +47,55 @@ zig build
 ### Test with curl
 
 ```bash
-# Create a container
+# Blob: Create a container
 curl -X PUT "http://127.0.0.1:10000/devstoreaccount1/mycontainer?restype=container"
 
-# Upload a blob
+# Blob: Upload a blob
 curl -X PUT -d "Hello, World!" "http://127.0.0.1:10000/devstoreaccount1/mycontainer/myblob.txt"
 
-# Download a blob
+# Blob: Download a blob
 curl "http://127.0.0.1:10000/devstoreaccount1/mycontainer/myblob.txt"
 
-# Get blob properties
+# Blob: Get blob properties
 curl -I "http://127.0.0.1:10000/devstoreaccount1/mycontainer/myblob.txt"
 
-# Delete a blob
+# Blob: Delete a blob
 curl -X DELETE "http://127.0.0.1:10000/devstoreaccount1/mycontainer/myblob.txt"
 
-# List containers
+# Blob: List containers
 curl "http://127.0.0.1:10000/devstoreaccount1/?comp=list"
 
-# List blobs in a container
+# Blob: List blobs in a container
 curl "http://127.0.0.1:10000/devstoreaccount1/mycontainer?restype=container&comp=list"
+
+# Blob Stage blocks
+curl -X PUT -d "Hello, " "http://127.0.0.1:10000/devstoreaccount1/mycontainer/myblob.txt?comp=block&blockid=YmxvY2sx"
+curl -X PUT -d "World!" "http://127.0.0.1:10000/devstoreaccount1/mycontainer/myblob.txt?comp=block&blockid=YmxvY2sy"
+
+# Blob List uncommitted blocks
+curl "http://127.0.0.1:10000/devstoreaccount1/mycontainer/myblob.txt?comp=blocklist"
+
+# Blob Commit block list
+curl -X PUT -d '<?xml version="1.0" encoding="utf-8"?><BlockList><Latest><Block><Name>YmxvY2sx</Name></Block><Block><Name>YmxvY2sy</Name></Block></Latest></BlockList>' \
+  "http://127.0.0.1:10000/devstoreaccount1/mycontainer/myblob.txt?comp=blocklist"
+
+# Queue: Create a queue
+curl -X PUT "http://127.0.0.1:10001/devstoreaccount1/myqueue"
+
+# Queue: List queues
+curl "http://127.0.0.1:10001/devstoreaccount1/?comp=list"
+
+# Queue: Put a message
+curl -X POST -d "Hello Queue!" "http://127.0.0.1:10001/devstoreaccount1/myqueue/messages"
+
+# Queue: Get messages (dequeue)
+curl "http://127.0.0.1:10001/devstoreaccount1/myqueue/messages"
+
+# Queue: Peek messages (without dequeue)
+curl "http://127.0.0.1:10001/devstoreaccount1/myqueue/messages?peekonly=true"
+
+# Queue: Clear messages
+curl -X DELETE "http://127.0.0.1:10001/devstoreaccount1/myqueue/messages"
 ```
 
 ## Default Dev Credentials
@@ -89,18 +118,27 @@ Zing implements the Azure Storage REST API.
 - `GET /{container}/{blob}` — Read blob (✅ 200 + content)
 - `HEAD /{container}/{blob}` — Blob metadata and properties (✅ 200)
 - `DELETE /{container}/{blob}` — Delete blob (✅ 202 Accepted)
+- `PUT /{container}/{blob}?comp=block&blockid={id}` — Stage an uncommitted block (✅ 201 Created)
+- `PUT /{container}/{blob}?comp=blocklist` — Commit staged blocks into a blob (✅ 201 Created)
+- `GET /{container}/{blob}?comp=blocklist` — List committed/uncommitted blocks (✅ 200 + XML)
+
+### Queue Service — Verified Working
+
+- `PUT /{queue}` — Create queue (✅ 201 Created)
+- `GET /?comp=list` — List queues (✅ 200 + XML)
+- `DELETE /{queue}` — Delete queue (✅ 204 No Content)
+- `POST /{queue}/messages` — Put a message (✅ 201 Created)
+- `GET /{queue}/messages` — Get messages (dequeue, ✅ 200 + XML)
+- `GET /{queue}/messages?peekonly=true` — Peek messages (✅ 200 + XML)
+- `DELETE /{queue}/messages/{id}?popreceipt={receipt}` — Delete message (✅ 204 No Content)
+- `PUT /{queue}/messages/{id}?popreceipt={receipt}&visibilitytimeout=X` — Update message (✅ 204 No Content)
+- `DELETE /{queue}/messages` — Clear all messages (✅ 204 No Content)
 
 ### Authentication — Implemented
 
 - `SAS` (Shared Access Signature) — ✅ Service SAS token parsing + HMAC-SHA256 validation + permission checking
 - `SharedKey` — ✅ Core HMAC-SHA256 validator implemented; router wiring in progress
 - No-auth requests pass through (dev mode)
-
-### In Progress
-
-- `PUT BLOCK LIST` — Commit staged blocks into a block blob
-- `GET BLOCK LIST` — List committed/uncommitted blocks
-- `PUT BLOCK` — Stage a block (uncommitted)
 
 ### Planned
 
@@ -110,8 +148,8 @@ Zing implements the Azure Storage REST API.
 - Container ACLs and permissions
 - Blob Snapshots / Versions
 - Copy Blob (async copy)
+- SharedKey auth wiring
 - OAuth token validation
-- Queue Service (port 10001)
 - Table Service (port 10002)
 - RA-GRS secondary
 
@@ -121,31 +159,27 @@ Zing implements the Azure Storage REST API.
 zing/
 ├── build.zig                    # Zig build manifest
 ├── src/
-│   ├── main.zig                 # Entry point, CLI args
+│   ├── main.zig                 # Entry point, CLI args, dual-server startup
 │   ├── http/
 │   │   ├── server.zig          # epoll HTTP server (Linux) / kqueue (macOS, stub)
-│   │   ├── router.zig          # Path → handler dispatch + auth
+│   │   ├── router.zig          # Blob path → handler dispatch + SAS/SharedKey auth
 │   │   ├── request.zig          # HTTP request parsing
-│   │   └── response.zig         # HTTP response building (future)
-│   ├── blob/
-│   │   ├── handlers.zig         # Blob REST API handlers (stub)
-│   │   └── container.zig        # Container state (stub)
+│   │   └── response.zig         # (future)
 │   ├── queue/
-│   │   └── handlers.zig         # (stub)
+│   │   ├── queue.zig            # In-memory QueueStore with visibility timeouts/pop receipts
+│   │   └── handlers.zig         # Queue REST API router
 │   ├── auth/
 │   │   ├── shared_key.zig       # SharedKey HMAC-SHA256 validation
 │   │   └── sas.zig              # Service SAS token validation
 │   ├── storage/
 │   │   ├── backend.zig          # Pluggable storage backend (FileBackend + MemBackend + ExtentStore)
-│   │   ├── file_backend.zig     # (future)
-│   │   └── mem_backend.zig      # (future)
 │   ├── xml/
-│   │   ├── serializer.zig       # XML response generation (ListContainers, ListBlobs)
-│   │   └── deserializer.zig     # XML request parsing (PutBlockList)
+│   │   ├── serializer.zig       # XML response generation
+│   │   └── deserializer.zig     # XML request parsing
 │   └── util/
-│       ├── allocator.zig        # Arena allocator
-│       ├── crc64.zig            # CRC64-NG with SIMD
-│       └── hex.zig              # Hex encoding
+│       ├── allocator.zig        # (future arena allocator)
+│       ├── crc64.zig            # (future SIMD CRC64-NG)
+│       └── hex.zig              # (future hex encoding)
 └── docs/
     ├── prompt.md                # Original project generation prompt
     └── memory-wiki.md           # Development diary
@@ -160,7 +194,7 @@ zing/
 
 ```bash
 zig build
-./zig-out/bin/zing --blob-port 10000
+./zig-out/bin/zing --blob-port 10000 --queue-port 10001
 ```
 
 ## Performance vs Azurite
@@ -169,7 +203,7 @@ zig build
 |--------|-------------------|------------|
 | Startup time | 2-5s (Node init) | ~50ms |
 | Concurrent connections | Low | 10k+ (epoll) |
-| Checksum computation | JS crypto (GC) | SIMD intrinsics |
+| Checksum computation | JS crypto (GC) | SIMD intrinsics (future) |
 | Memory model | LokiJS + GC | Arena allocators |
 | Blob I/O | Node.js `fs` | O_DIRECT / mmap |
 | Binary distribution | npm install | Single static binary |

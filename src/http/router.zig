@@ -21,9 +21,22 @@ pub const RouteResult = struct {
 pub const Router = struct {
     allocator: std.mem.Allocator,
     backend: storage.StorageBackend,
+    lease_store: std.StringHashMap(LeaseInfo),
+
+    pub const LeaseInfo = struct {
+        lease_id: []u8,
+        duration: i64,
+        expiry: i64,
+        proposed_lease_id: ?[]u8,
+        break_remaining: i64,
+    };
 
     pub fn init(allocator: std.mem.Allocator, backend: storage.StorageBackend) Router {
-        return .{ .allocator = allocator, .backend = backend };
+        return .{
+            .allocator = allocator,
+            .backend = backend,
+            .lease_store = std.StringHashMap(LeaseInfo).init(allocator),
+        };
     }
 
     /// Route a request to the appropriate handler.
@@ -115,6 +128,9 @@ pub const Router = struct {
 
         // Block blob operations
         if (comp != null) {
+            if (mem.eql(u8, method, "PUT") and mem.eql(u8, comp.?, "lease")) {
+                return self.handleLease(container, blob, headers);
+            }
             if (mem.eql(u8, method, "PUT") and mem.eql(u8, comp.?, "block")) {
                 const block_id = self.getQueryParam(query, "blockid") orelse return self.badRequest("missing blockid");
                 _ = try self.backend.stageBlock(container, blob, block_id, body);
@@ -337,6 +353,81 @@ pub const Router = struct {
             .body = xml_body,
             .content_type = "application/xml",
         };
+    }
+
+    fn handleLease(self: *Router, container: []const u8, blob: []const u8, headers: std.StringHashMap([]const u8)) !RouteResult {
+        const action = headers.get("x-ms-lease-action") orelse return self.badRequest("missing x-ms-lease-action");
+        const key = try std.fmt.allocPrint(self.allocator, "{s}/{s}", .{ container, blob });
+        defer self.allocator.free(key);
+        const now_sec: i64 = blk: {
+            var ts: std.os.linux.timespec = undefined;
+            _ = std.os.linux.clock_gettime(.REALTIME, &ts);
+            break :blk @as(i64, @intCast(ts.sec));
+        };
+
+        if (mem.eql(u8, action, "acquire")) {
+            const duration_str = headers.get("x-ms-lease-duration") orelse return self.badRequest("missing x-ms-lease-duration");
+            const duration = std.fmt.parseInt(i64, duration_str, 10) catch return self.badRequest("invalid lease duration");
+
+            // Generate a lease ID using timestamp
+            const lease_id = try std.fmt.allocPrint(self.allocator, "{d}-{d}", .{ now_sec, @mod(now_sec * 314159, 1000000) });
+            defer self.allocator.free(lease_id);
+
+            const expiry = if (duration == -1) std.math.maxInt(i64) else now_sec + duration;
+            const info = LeaseInfo{
+                .lease_id = try self.allocator.dupe(u8, lease_id),
+                .duration = duration,
+                .expiry = expiry,
+                .proposed_lease_id = null,
+                .break_remaining = 0,
+            };
+            try self.lease_store.put(try self.allocator.dupe(u8, key), info);
+            const body = try self.allocator.dupe(u8, lease_id);
+            return RouteResult{
+                .status = "201 Created",
+                .body = body,
+                .content_type = "text/plain",
+            };
+        }
+
+        const entry = self.lease_store.getPtr(key) orelse return self.badRequest("no active lease");
+        if (mem.eql(u8, action, "renew")) {
+            const lease_id = headers.get("x-ms-lease-id") orelse return self.badRequest("missing x-ms-lease-id");
+            if (!mem.eql(u8, entry.lease_id, lease_id)) return self.badRequest("lease ID mismatch");
+            entry.expiry = if (entry.duration == -1) std.math.maxInt(i64) else now_sec + entry.duration;
+            return RouteResult{ .status = "200 OK", .body = "", .content_type = "" };
+        }
+        if (mem.eql(u8, action, "change")) {
+            const lease_id = headers.get("x-ms-lease-id") orelse return self.badRequest("missing x-ms-lease-id");
+            const proposed = headers.get("x-ms-proposed-lease-id") orelse return self.badRequest("missing x-ms-proposed-lease-id");
+            if (!mem.eql(u8, entry.lease_id, lease_id)) return self.badRequest("lease ID mismatch");
+            self.allocator.free(entry.lease_id);
+            entry.lease_id = try self.allocator.dupe(u8, proposed);
+            return RouteResult{ .status = "200 OK", .body = "", .content_type = "" };
+        }
+        if (mem.eql(u8, action, "release")) {
+            const lease_id = headers.get("x-ms-lease-id") orelse return self.badRequest("missing x-ms-lease-id");
+            if (!mem.eql(u8, entry.lease_id, lease_id)) return self.badRequest("lease ID mismatch");
+            _ = self.lease_store.remove(key);
+            return RouteResult{ .status = "200 OK", .body = "", .content_type = "" };
+        }
+        if (mem.eql(u8, action, "break")) {
+            const break_sec = headers.get("x-ms-lease-break-period");
+            if (break_sec) |bs| {
+                entry.break_remaining = std.fmt.parseInt(i64, bs, 10) catch 15;
+            } else {
+                entry.break_remaining = 0;
+            }
+            if (entry.break_remaining == 0) {
+                _ = self.lease_store.remove(key);
+            }
+            return RouteResult{
+                .status = "202 Accepted",
+                .body = "",
+                .content_type = "",
+            };
+        }
+        return self.badRequest("unknown lease action");
     }
 
     fn copyBlob(self: *Router, dst_container: []const u8, dst_blob: []const u8, source: []const u8) !RouteResult {

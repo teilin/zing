@@ -21,6 +21,9 @@ pub const StorageBackend = struct {
         deleteContainer: *const fn (ctx: *anyopaque, container: []const u8) anyerror!void,
         containerExists: *const fn (ctx: *anyopaque, container: []const u8) anyerror!bool,
         containerProperties: *const fn (ctx: *anyopaque, container: []const u8) anyerror!ContainerProperties,
+        stageBlock: *const fn (ctx: *anyopaque, container: []const u8, blob: []const u8, block_id: []const u8, data: []const u8) anyerror!u64,
+        commitBlocks: *const fn (ctx: *anyopaque, container: []const u8, blob: []const u8, block_ids: []const []const u8) anyerror!u64,
+        getBlockList: *const fn (ctx: *anyopaque, container: []const u8, blob: []const u8) anyerror!BlockListResult,
         close: *const fn (ctx: *anyopaque) void,
     };
 
@@ -54,6 +57,16 @@ pub const StorageBackend = struct {
         etag: []const u8,
         lease_status: []const u8,
         lease_state: []const u8,
+    };
+
+    pub const BlockItem = struct {
+        name: []const u8,
+        size: u64,
+    };
+
+    pub const BlockListResult = struct {
+        committed: []const BlockItem = &.{},
+        uncommitted: []const BlockItem = &.{},
     };
 
     pub const BlobItem = struct {
@@ -132,6 +145,18 @@ pub const StorageBackend = struct {
 
     pub fn close(self: StorageBackend) void {
         return self.vtable.close(self.ptr);
+    }
+
+    pub fn stageBlock(self: StorageBackend, container: []const u8, blob: []const u8, block_id: []const u8, data: []const u8) !u64 {
+        return self.vtable.stageBlock(self.ptr, container, blob, block_id, data);
+    }
+
+    pub fn commitBlocks(self: StorageBackend, container: []const u8, blob: []const u8, block_ids: []const []const u8) !u64 {
+        return self.vtable.commitBlocks(self.ptr, container, blob, block_ids);
+    }
+
+    pub fn getBlockList(self: StorageBackend, container: []const u8, blob: []const u8) !BlockListResult {
+        return self.vtable.getBlockList(self.ptr, container, blob);
     }
 
     pub fn initFile(allocator: std.mem.Allocator, workspace: []const u8) !StorageBackend {
@@ -341,6 +366,7 @@ pub const FileBackend = struct {
     workspace: []const u8,
     allocator: mem.Allocator,
     extent_store: std.StringHashMap(ExtentData),
+    block_store: ExtentStore,
 
     pub const ExtentData = struct {
         data: []u8,
@@ -354,6 +380,7 @@ pub const FileBackend = struct {
             .workspace = workspace,
             .allocator = allocator,
             .extent_store = std.StringHashMap(ExtentData).init(allocator),
+            .block_store = ExtentStore.init(allocator),
         };
     }
 
@@ -373,8 +400,11 @@ pub const FileBackend = struct {
                 .deleteContainer = deleteContainer,
                 .containerExists = containerExists,
                 .containerProperties = containerProperties,
-                .close = close,
-            },
+                                .close = close,
+                                .stageBlock = stageBlock,
+                                .commitBlocks = commitBlocks,
+                                .getBlockList = getBlockList,
+                            },
         };
     }
 
@@ -740,7 +770,62 @@ pub const FileBackend = struct {
             self.allocator.free(entry.value_ptr.data);
         }
         self.extent_store.deinit();
+        self.block_store.deinit();
         self.allocator.destroy(self);
+    }
+
+    fn stageBlock(ctx: *anyopaque, container: []const u8, blob: []const u8, block_id: []const u8, data: []const u8) !u64 {
+        const self: *FileBackend = @ptrCast(@alignCast(ctx));
+        return self.block_store.stageBlock(container, blob, block_id, data, "");
+    }
+
+    fn commitBlocks(ctx: *anyopaque, container: []const u8, blob: []const u8, block_ids: []const []const u8) !u64 {
+        const self: *FileBackend = @ptrCast(@alignCast(ctx));
+        const committed_data = try self.block_store.commitBlocks(container, blob, block_ids, "");
+        errdefer self.allocator.free(committed_data);
+        // Write the assembled blob to disk
+        const full_path = try self.pathFor(container, blob);
+        defer self.allocator.free(full_path);
+        const container_dir = try std.fmt.allocPrint(self.allocator, "{s}/{s}", .{ self.workspace, container });
+        defer self.allocator.free(container_dir);
+        try makePath(self.allocator, container_dir);
+        const full_path_z = try self.allocator.dupeZ(u8, full_path);
+        defer self.allocator.free(full_path_z);
+        const fd_rc = linux.openat(linux.AT.FDCWD, full_path_z, linux.O{ .ACCMODE = .WRONLY, .CREAT = true, .TRUNC = true }, 0o644);
+        const fd_err = syscallErrno(fd_rc);
+        if (fd_err != null) return errnoToFileError(fd_err.?);
+        const fd: i32 = @intCast(fd_rc);
+        defer _ = linux.close(fd);
+        const written = linux.write(fd, committed_data.ptr, committed_data.len);
+        const write_err = syscallErrno(written);
+        if (write_err != null) return errnoToFileError(write_err.?);
+        self.allocator.free(committed_data);
+        return committed_data.len;
+    }
+
+    fn getBlockList(ctx: *anyopaque, container: []const u8, blob: []const u8) !StorageBackend.BlockListResult {
+        const self: *FileBackend = @ptrCast(@alignCast(ctx));
+        const blocks = try self.block_store.getUncommittedBlocks(container, blob);
+
+        var committed = std.array_list.Managed(StorageBackend.BlockItem).init(self.allocator);
+        errdefer committed.deinit();
+        var uncommitted = std.array_list.Managed(StorageBackend.BlockItem).init(self.allocator);
+        errdefer uncommitted.deinit();
+
+        for (blocks) |block| {
+            try uncommitted.append(.{
+                .name = block.id,
+                .size = block.size,
+            });
+        }
+
+        // TODO: also read committed blocks from metadata file
+        // For now, all staged blocks are uncommitted
+
+        return StorageBackend.BlockListResult{
+            .committed = try committed.toOwnedSlice(),
+            .uncommitted = try uncommitted.toOwnedSlice(),
+        };
     }
 
     fn etagForPath(self: *FileBackend, path: []const u8) ![]u8 {
@@ -820,7 +905,7 @@ pub const MemBackend = struct {
 
 pub const ExtentStore = struct {
     allocator: mem.Allocator,
-    pending_blocks: std.StringHashMap(std.ArrayList(UncommittedBlock)),
+    pending_blocks: std.StringHashMap(std.array_list.Managed(UncommittedBlock)),
     extents: std.StringHashMap([]u8),
 
     pub const UncommittedBlock = struct {
@@ -832,7 +917,7 @@ pub const ExtentStore = struct {
     pub fn init(allocator: mem.Allocator) ExtentStore {
         return .{
             .allocator = allocator,
-            .pending_blocks = std.StringHashMap(std.ArrayList(UncommittedBlock)).init(allocator),
+            .pending_blocks = std.StringHashMap(std.array_list.Managed(UncommittedBlock)).init(allocator),
             .extents = std.StringHashMap([]u8).init(allocator),
         };
     }
@@ -842,8 +927,10 @@ pub const ExtentStore = struct {
         while (p_it.next()) |entry| {
             for (entry.value_ptr.items) |block| {
                 self.allocator.free(block.data);
+                self.allocator.free(block.id);
             }
             entry.value_ptr.deinit();
+            self.allocator.free(entry.key_ptr.*);
         }
         self.pending_blocks.deinit();
 
@@ -858,9 +945,9 @@ pub const ExtentStore = struct {
         const key = try std.fmt.allocPrint(self.allocator, "{s}/{s}", .{ container, blob });
         defer self.allocator.free(key);
 
-        const gop = try self.pending_blocks.getOrPut(key);
+        const gop = try self.pending_blocks.getOrPut(try self.allocator.dupe(u8, key));
         if (!gop.found_existing) {
-            gop.value_ptr.* = std.ArrayList(UncommittedBlock).init(self.allocator);
+            gop.value_ptr.* = std.array_list.Managed(UncommittedBlock).init(self.allocator);
         }
 
         try gop.value_ptr.append(.{
@@ -876,7 +963,10 @@ pub const ExtentStore = struct {
         const key = try std.fmt.allocPrint(self.allocator, "{s}/{s}", .{ container, blob });
         defer self.allocator.free(key);
 
-        const blocks = self.pending_blocks.get(key) orelse
+        const duped_key = try self.allocator.dupe(u8, key);
+        defer self.allocator.free(duped_key);
+
+        var blocks = self.pending_blocks.get(duped_key) orelse
             return error.NoUncommittedBlocks;
 
         var total_size: u64 = 0;

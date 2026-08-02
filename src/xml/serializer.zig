@@ -1,5 +1,6 @@
 const std = @import("std");
 const mem = std.mem;
+const storage = @import("../storage/backend.zig");
 
 /// XML serializer for Azure Storage REST API responses.
 ///
@@ -187,6 +188,29 @@ pub const Serializer = struct {
         try self.textElem("BlobType", entry.properties.blob_type);
         try self.closeTag("Properties");
         try self.closeTag("Blob");
+    }
+
+    /// Serialize a GetBlockListResponse XML document.
+    pub fn writeGetBlockListResponse(self: *Serializer, result: storage.StorageBackend.BlockListResult) !void {
+        try self.raw("<?xml version=\"1.0\" encoding=\"utf-8\"?>");
+        try self.elemOpen("BlockList");
+        try self.elemOpen("CommittedBlocks");
+        for (result.committed) |block| {
+            try self.elemOpen("Block");
+            try self.textElem("Name", block.name);
+            try self.textElemInt("Size", block.size);
+            try self.closeTag("Block");
+        }
+        try self.closeTag("CommittedBlocks");
+        try self.elemOpen("UncommittedBlocks");
+        for (result.uncommitted) |block| {
+            try self.elemOpen("Block");
+            try self.textElem("Name", block.name);
+            try self.textElemInt("Size", block.size);
+            try self.closeTag("Block");
+        }
+        try self.closeTag("UncommittedBlocks");
+        try self.closeTag("BlockList");
     }
 };
 

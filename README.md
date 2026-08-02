@@ -18,6 +18,7 @@ Azurite is built on Node.js/TypeScript — which means GC pauses, event-loop bot
 |---------|------|--------|
 | Blob Storage | 10000 | ✅ **Blob CRUD** — PUT, GET, HEAD, DELETE |
 | Container management | 10000 | ✅ **Container CRUD** — Create, List, Delete |
+| Block blob assembly | 10000 | 🚧 PUT BLOCK LIST / GET BLOCK LIST (in progress) |
 | Queue Storage | 10001 | 🚧 Planned |
 | Table Storage | 10002 | 🚧 Planned |
 
@@ -89,18 +90,29 @@ Zing implements the Azure Storage REST API.
 - `HEAD /{container}/{blob}` — Blob metadata and properties (✅ 200)
 - `DELETE /{container}/{blob}` — Delete blob (✅ 202 Accepted)
 
+### Authentication — Implemented
+
+- `SAS` (Shared Access Signature) — ✅ Service SAS token parsing + HMAC-SHA256 validation + permission checking
+- `SharedKey` — ✅ Core HMAC-SHA256 validator implemented; router wiring in progress
+- No-auth requests pass through (dev mode)
+
+### In Progress
+
+- `PUT BLOCK LIST` — Commit staged blocks into a block blob
+- `GET BLOCK LIST` — List committed/uncommitted blocks
+- `PUT BLOCK` — Stage a block (uncommitted)
+
 ### Planned
 
 - Page Blobs (PutPage, ReadPages)
 - Append Blobs
-- `PUT BLOCK LIST` / `GET BLOCK LIST`
 - Blob Leases
 - Container ACLs and permissions
 - Blob Snapshots / Versions
 - Copy Blob (async copy)
+- OAuth token validation
 - Queue Service (port 10001)
 - Table Service (port 10002)
-- OAuth / SAS token validation
 - RA-GRS secondary
 
 ## Architecture
@@ -111,8 +123,8 @@ zing/
 ├── src/
 │   ├── main.zig                 # Entry point, CLI args
 │   ├── http/
-│   │   ├── server.zig          # epoll/kqueue HTTP server
-│   │   ├── router.zig          # Path → handler dispatch
+│   │   ├── server.zig          # epoll HTTP server (Linux) / kqueue (macOS, stub)
+│   │   ├── router.zig          # Path → handler dispatch + auth
 │   │   ├── request.zig          # HTTP request parsing
 │   │   └── response.zig         # HTTP response building (future)
 │   ├── blob/
@@ -122,7 +134,7 @@ zing/
 │   │   └── handlers.zig         # (stub)
 │   ├── auth/
 │   │   ├── shared_key.zig       # SharedKey HMAC-SHA256 validation
-│   │   └── sas.zig              # (stub)
+│   │   └── sas.zig              # Service SAS token validation
 │   ├── storage/
 │   │   ├── backend.zig          # Pluggable storage backend (FileBackend + MemBackend + ExtentStore)
 │   │   ├── file_backend.zig     # (future)
@@ -135,7 +147,8 @@ zing/
 │       ├── crc64.zig            # CRC64-NG with SIMD
 │       └── hex.zig              # Hex encoding
 └── docs/
-    └── prompt.md                # Original project generation prompt
+    ├── prompt.md                # Original project generation prompt
+    └── memory-wiki.md           # Development diary
 ```
 
 ## Development

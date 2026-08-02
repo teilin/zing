@@ -177,7 +177,7 @@ pub const XmlParser = struct {
         if (self.pos >= self.source.len) return null;
 
         // Skip whitespace between events (except in text — handled separately)
-        while (self.pos < self.source.len and self.isSpace(self.source[self.pos])) {
+        while (self.pos < self.source.len and isSpace(self.source[self.pos])) {
             self.pos += 1;
         }
         if (self.pos >= self.source.len) return null;
@@ -186,24 +186,24 @@ pub const XmlParser = struct {
             if (self.pos + 1 < self.source.len) {
                 const next_char = self.source[self.pos + 1];
                 if (next_char == '?') {
-                    return self.parseDeclaration();
+                    return @as(?Event, try self.parseDeclaration());
                 } else if (next_char == '!') {
                     if (self.pos + 9 < self.source.len and
                         mem.startsWith(u8, self.source[self.pos..self.pos + 9], "<![CDATA["))
                     {
-                        return self.parseCdata();
+                        return @as(?Event, try self.parseCdata());
                     }
-                    return self.parseComment();
+                    return @as(?Event, try self.parseComment());
                 } else if (next_char == '/') {
-                    return self.parseEndElement();
+                    return @as(?Event, try self.parseEndElement());
                 } else {
-                    return self.parseStartElement();
+                    return @as(?Event, try self.parseStartElement());
                 }
             }
         }
 
         // Text content
-        return self.parseText();
+        return @as(?Event, try self.parseText());
     }
 
     fn parseDeclaration(self: *XmlParser) !Event {
@@ -241,7 +241,7 @@ pub const XmlParser = struct {
         self.pos += 1; // skip '<'
         const start = self.pos;
 
-        while (self.pos < self.source.len and !self.isSpace(self.source[self.pos]) and
+        while (self.pos < self.source.len and !isSpace(self.source[self.pos]) and
             self.source[self.pos] != '>' and self.source[self.pos] != '/') : (self.pos += 1)
         {}
 
@@ -249,14 +249,14 @@ pub const XmlParser = struct {
 
         // Parse attributes
         while (self.pos < self.source.len and self.source[self.pos] != '>' and self.source[self.pos] != '/') {
-            if (self.isSpace(self.source[self.pos])) {
+            if (isSpace(self.source[self.pos])) {
                 self.pos += 1;
                 continue;
             }
 
             // attribute name
             const attr_start = self.pos;
-            while (self.pos < self.source.len and self.source[self.pos] != '=' and !self.isSpace(self.source[self.pos])) : (self.pos += 1)
+            while (self.pos < self.source.len and self.source[self.pos] != '=' and !isSpace(self.source[self.pos])) : (self.pos += 1)
             {}
             const attr_name = self.source[attr_start..self.pos];
 
@@ -330,7 +330,7 @@ pub const XmlParser = struct {
     /// After a start_element event, retrieve an attribute value by name.
     /// Note: requires re-parsing from the start_element position.
     /// For simplicity, returns null if attribute not found.
-    pub fn attribute(self: *const XmlParser, name: []const u8) ?[]const u8 {
+    pub fn attribute(_: *const XmlParser, name: []const u8) ?[]const u8 {
         // The parser already consumed the tag during next().
         // Re-scan from the stored start position would require storing it.
         // For now, return null — callers should use parseElementText approach.
@@ -340,9 +340,11 @@ pub const XmlParser = struct {
 
     /// Collect all text content until the matching end element.
     pub fn textContent(self: *XmlParser) ![]const u8 {
-        // Caller must pass the parser positioned right after the start_element event.
-        // We accumulate text from subsequent events until end_element.
-        return "";
+        const start = self.pos;
+        while (self.pos < self.source.len and self.source[self.pos] != '<') {
+            self.pos += 1;
+        }
+        return self.source[start..self.pos];
     }
 };
 

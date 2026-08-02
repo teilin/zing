@@ -2,6 +2,7 @@ const std = @import("std");
 const mem = std.mem;
 const storage = @import("../storage/backend.zig");
 const xml = @import("../xml/serializer.zig");
+const xml_deser = @import("../xml/deserializer.zig");
 const sas = @import("../auth/sas.zig");
 const shared_key = @import("../auth/shared_key.zig");
 
@@ -39,7 +40,7 @@ pub const Router = struct {
         try self.authenticate(method, path, query, headers);
 
         // Strip SAS query params from the query string before routing
-        const clean_query = try self.stripSasParams(query);
+        const clean_query = query;
         // Parse path: /account/container/blob
         var segments = mem.splitScalar(u8, path, '/');
         _ = segments.next(); // skip leading empty
@@ -67,7 +68,7 @@ pub const Router = struct {
         }
 
         // Blob-level operations
-        return self.handleBlobLevel(method, container, blob, body);
+        return self.handleBlobLevel(method, container, blob, clean_query, body);
     }
 
     fn handleAccountLevel(self: *Router, method: []const u8, query: []const u8) !RouteResult {
@@ -106,7 +107,29 @@ pub const Router = struct {
         return self.notFound();
     }
 
-    fn handleBlobLevel(self: *Router, method: []const u8, container: []const u8, blob: []const u8, body: []const u8) !RouteResult {
+    fn handleBlobLevel(self: *Router, method: []const u8, container: []const u8, blob: []const u8, query: []const u8, body: []const u8) !RouteResult {
+        const comp = self.getQueryParam(query, "comp");
+
+        // Block blob operations
+        if (comp != null) {
+            if (mem.eql(u8, method, "PUT") and mem.eql(u8, comp.?, "block")) {
+                const block_id = self.getQueryParam(query, "blockid") orelse return self.badRequest("missing blockid");
+                _ = try self.backend.stageBlock(container, blob, block_id, body);
+                return RouteResult{
+                    .status = "201 Created",
+                    .body = "",
+                    .content_type = "",
+                };
+            }
+            if (mem.eql(u8, method, "PUT") and mem.eql(u8, comp.?, "blocklist")) {
+                return self.putBlockList(container, blob, body);
+            }
+            if (mem.eql(u8, method, "GET") and mem.eql(u8, comp.?, "blocklist")) {
+                return self.getBlockList(container, blob);
+            }
+        }
+
+        // Standard blob CRUD
         if (mem.eql(u8, method, "PUT") or mem.eql(u8, method, "PUT")) {
             return self.putBlob(container, blob, body);
         }
@@ -235,6 +258,35 @@ pub const Router = struct {
     }
 
     // ── Blob handlers ───────────────────────────────────────────────────────────
+
+    fn putBlockList(self: *Router, container: []const u8, blob: []const u8, body: []const u8) !RouteResult {
+        var deser = xml_deser.Deserializer.init(self.allocator);
+        const block_list = try deser.parsePutBlockList(body);
+        defer {
+            for (block_list.committed) |id| self.allocator.free(id);
+            for (block_list.uncommitted) |id| self.allocator.free(id);
+            for (block_list.latest) |id| self.allocator.free(id);
+        }
+        _ = try self.backend.commitBlocks(container, blob, block_list.latest);
+        return RouteResult{
+            .status = "201 Created",
+            .body = "",
+            .content_type = "",
+        };
+    }
+
+    fn getBlockList(self: *Router, container: []const u8, blob: []const u8) !RouteResult {
+        const result = try self.backend.getBlockList(container, blob);
+        var ser = xml.Serializer.init(self.allocator);
+        defer ser.deinit();
+        ser.writeGetBlockListResponse(result) catch return self.internalError();
+        const xml_body = try self.allocator.dupe(u8, ser.bytes());
+        return RouteResult{
+            .status = "200 OK",
+            .body = xml_body,
+            .content_type = "application/xml",
+        };
+    }
 
     fn putBlob(self: *Router, container: []const u8, blob: []const u8, data: []const u8) !RouteResult {
         self.backend.createContainer(container) catch {};
